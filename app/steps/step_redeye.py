@@ -43,6 +43,7 @@ class RedEyeStep(StepBase):
     short_name         = "YeuxRouges"
     slow               = True
     enabled_by_default = True
+    has_overlay        = True   # active le bouton overlay dans l'UI (sans recalcul)
 
     param_defs = [
         {"key": "sensitivity", "label": "Sensibilité (abaisser si photos fanées)", "type": "float",
@@ -51,8 +52,6 @@ class RedEyeStep(StepBase):
          "default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05},
         {"key": "expand",      "label": "Expansion rayon iris (×)",          "type": "float",
          "default": 1.4, "min": 1.0, "max": 3.0, "step": 0.1},
-        {"key": "show_detections", "label": "Afficher détections (img. originale)",
-         "type": "bool", "default": False},
     ]
 
     def __init__(self):
@@ -74,38 +73,30 @@ class RedEyeStep(StepBase):
         return self._face_helper
 
     def process(self, img: np.ndarray, params: dict, context: dict):
-        sensitivity  = float(params.get("sensitivity",     2.0))
-        strength     = float(params.get("strength",        1.0))
-        expand       = float(params.get("expand",          1.4))
-        show_det     = bool(params.get("show_detections",  False))
+        sensitivity = float(params.get("sensitivity", 1.8))
+        strength    = float(params.get("strength",    1.0))
+        expand      = float(params.get("expand",      1.4))
 
         # ── 1. Détecter les zones œil ────────────────────────────────────────
         eye_regions = _detect_eye_regions(self._get_face_helper(), img)
-        if not eye_regions:
+        fallback    = not bool(eye_regions)
+        if fallback:
             eye_regions = _fallback_eye_regions(img, sensitivity)
 
-        # ── 2. Appliquer la correction zone par zone ─────────────────────────
-        result           = img.copy()
-        detected_circles: list[tuple[float, float, float]] = []
+        # ── 2. Appliquer la correction + collecter les données de détection ──
+        result     = img.copy()
+        detections: list[dict] = []
 
         for (ex, ey, er) in eye_regions:
-            circles = _correct_eye_region(result, ex, ey, er,
-                                          sensitivity, strength, expand)
-            detected_circles.extend(circles)
+            iris = _correct_eye_region(result, ex, ey, er,
+                                       sensitivity, strength, expand)
+            detections.append({
+                "search": (float(ex), float(ey), float(er)),
+                "iris":   iris,   # (cx, cy, r) en coords globales, ou None
+            })
 
-        # ── 3. Sortie ────────────────────────────────────────────────────────
-        if show_det:
-            # Retourne l'image d'ORIGINE annotée (pas la version corrigée)
-            overlay = img.copy()
-            for (cx, cy, r) in detected_circles:
-                cv2.circle(overlay, (int(cx), int(cy)), max(int(r), 3),
-                           (0, 210, 0), 2, cv2.LINE_AA)
-                # Petit point central pour repérer le centre précis
-                cv2.circle(overlay, (int(cx), int(cy)), 1,
-                           (0, 255, 128), -1, cv2.LINE_AA)
-            return overlay, {}
-
-        return result, {}
+        # ── 3. Retour + données pour l'overlay (sans recalcul depuis l'UI) ───
+        return result, {"redeye_detections": detections}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -206,30 +197,53 @@ def _correct_eye_region(
     red_m = cv2.morphologyEx(red_m, cv2.MORPH_CLOSE, k, iterations=2)
 
     if int(red_m.sum()) // 255 < _MIN_RED_PIXELS:
-        return []
+        return None
 
-    # ── c. Plus grande composante connexe ────────────────────────────────────
-    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(red_m, 8)
+    # ── c. Composante connexe la plus PROCHE du centre du landmark ───────────
+    #  (pas la plus grande : évite de prendre des pixels de peau en périphérie)
+    n_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(red_m, 8)
     if n_labels < 2:
-        return []
-    largest   = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
-    blob_area = int(stats[largest, cv2.CC_STAT_AREA])
-    if blob_area < _MIN_BLOB_AREA:
-        return []
+        return None
 
-    blob = (labels == largest).astype(np.uint8)
+    # Centre du crop = position du landmark RetinaFace
+    lm_x = cx - x1
+    lm_y = cy - y1
+
+    best_lbl  = -1
+    best_dist = float("inf")
+    for lbl in range(1, n_labels):
+        area = int(stats[lbl, cv2.CC_STAT_AREA])
+        if area < _MIN_BLOB_AREA or area > _MAX_BLOB_AREA:
+            continue
+        comp_cx, comp_cy = centroids[lbl]
+        dist = float(np.sqrt((comp_cx - lm_x) ** 2 + (comp_cy - lm_y) ** 2))
+        if dist < best_dist:
+            best_dist = dist
+            best_lbl  = lbl
+
+    if best_lbl == -1:
+        return None
+
+    # Rejecter si le blob est trop éloigné du centre (faux positif périphérique)
+    if best_dist > search_r * 0.85:
+        return None
+
+    blob      = (labels == best_lbl).astype(np.uint8)
+    blob_area = int(stats[best_lbl, cv2.CC_STAT_AREA])
+    if blob_area < _MIN_BLOB_AREA:
+        return None
 
     # ── d. Cercle englobant minimum + expansion ──────────────────────────────
-    pts_xy        = np.column_stack(np.where(blob)[::-1]).astype(np.float32)  # (x,y)
+    pts_xy         = np.column_stack(np.where(blob)[::-1]).astype(np.float32)  # (x,y)
     (bcx, bcy), base_r = cv2.minEnclosingCircle(pts_xy)
-    iris_r        = max(base_r * expand, 3.0)
+    iris_r         = max(base_r * expand, 3.0)
 
     # ── e. Masque gaussien doux ───────────────────────────────────────────────
     ch, cw = crop.shape[:2]
     yy, xx = np.mgrid[:ch, :cw]
-    dist      = np.sqrt((xx - bcx) ** 2 + (yy - bcy) ** 2)
+    dist_map  = np.sqrt((xx - bcx) ** 2 + (yy - bcy) ** 2)
     sigma     = iris_r / 2.5
-    soft_mask = np.exp(-0.5 * (dist / (sigma + 1e-6)) ** 2).astype(np.float32)
+    soft_mask = np.exp(-0.5 * (dist_map / (sigma + 1e-6)) ** 2).astype(np.float32)
 
     # ── f. Correction : R_naturel = (G + B) / 2 ──────────────────────────────
     R_f   = R_c.astype(np.float32)
@@ -240,4 +254,5 @@ def _correct_eye_region(
     crop[:, :, 2] = np.clip(R_new, 0, 255).astype(np.uint8)
     result[y1:y2, x1:x2] = crop
 
-    return [(x1 + bcx, y1 + bcy, iris_r)]
+    # Retourner les coordonnées globales de l'iris détecté
+    return (float(x1 + bcx), float(y1 + bcy), float(iris_r))

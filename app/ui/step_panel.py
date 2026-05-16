@@ -91,10 +91,11 @@ _STATE_LABELS = {
 class StepPanel(QWidget):
     """Panneau d'une étape : en-tête + corps pliable."""
 
-    enabled_changed  = pyqtSignal(str, bool)    # (step_id, enabled)
+    enabled_changed  = pyqtSignal(str, bool)         # (step_id, enabled)
     param_changed    = pyqtSignal(str, str, object)  # (step_id, key, value)
-    rerun_requested  = pyqtSignal(str)           # step_id
-    drag_requested   = pyqtSignal(str)           # step_id — relayé depuis DragHandle
+    rerun_requested  = pyqtSignal(str)               # step_id
+    drag_requested   = pyqtSignal(str)               # step_id — relayé depuis DragHandle
+    overlay_toggled  = pyqtSignal(str, bool)          # (step_id, enabled) — sans recalcul
 
     def __init__(self, step, parent=None):
         super().__init__(parent)
@@ -177,6 +178,23 @@ class StepPanel(QWidget):
             self._param_rows[pdef["key"]] = row
             body_layout.addWidget(row)
 
+        # Checkbox overlay (optionnelle, pour les étapes avec has_overlay=True)
+        self._overlay_cb: Optional[QCheckBox] = None
+        if getattr(self._step, "has_overlay", False):
+            sep = QFrame()
+            sep.setFrameShape(QFrame.Shape.HLine)
+            sep.setStyleSheet("background: #2a2a3a; margin: 2px 0;")
+            sep.setFixedHeight(1)
+            body_layout.addWidget(sep)
+            self._overlay_cb = QCheckBox("Afficher détections (overlay)")
+            self._overlay_cb.setStyleSheet(
+                "QCheckBox { color: #7ec8c8; font-size: 11px; margin-top: 2px; }"
+            )
+            self._overlay_cb.toggled.connect(
+                lambda v, sid=self._step.id: self.overlay_toggled.emit(sid, v)
+            )
+            body_layout.addWidget(self._overlay_cb)
+
         # Bouton Recalculer
         btn_row = QHBoxLayout()
         btn_row.setContentsMargins(0, 4, 0, 0)
@@ -226,6 +244,13 @@ class StepPanel(QWidget):
     def set_enabled(self, val: bool):
         self._enable_cb.setChecked(val)
 
+    def reset_overlay(self):
+        """Désactive le checkbox overlay sans émettre de signal (ex. nouvelle image)."""
+        if self._overlay_cb is not None:
+            self._overlay_cb.blockSignals(True)
+            self._overlay_cb.setChecked(False)
+            self._overlay_cb.blockSignals(False)
+
     # ── Interne ──────────────────────────────────────────────────────────────
 
     def _toggle(self):
@@ -257,6 +282,7 @@ class StepListWidget(QWidget):
     param_changed    = pyqtSignal(str, str, object)
     enabled_changed  = pyqtSignal(str, bool)
     rerun_requested  = pyqtSignal(str)
+    overlay_toggled  = pyqtSignal(str, bool)      # relayé depuis les panneaux
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -288,12 +314,18 @@ class StepListWidget(QWidget):
             panel.param_changed.connect(self.param_changed)
             panel.enabled_changed.connect(self.enabled_changed)
             panel.rerun_requested.connect(self.rerun_requested)
+            panel.overlay_toggled.connect(self.overlay_toggled)
             self._panels[step.id] = panel
             self._order.append(step.id)
             self._vbox.insertWidget(len(self._order) - 1, panel)
 
     def get_panel(self, step_id: str) -> Optional[StepPanel]:
         return self._panels.get(step_id)
+
+    def reset_overlays(self):
+        """Réinitialise tous les checkboxes overlay (sans émettre de signal)."""
+        for panel in self._panels.values():
+            panel.reset_overlay()
 
     def get_order(self) -> list[str]:
         return list(self._order)

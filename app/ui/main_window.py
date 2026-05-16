@@ -43,6 +43,9 @@ class MainApp(QMainWindow):
         self._view_a: tuple[Optional[int], str] = (None, "original")
         self._view_b: Optional[tuple[Optional[int], str]] = None
 
+        # Overlay détections (step_redeye) — actif sans recalcul
+        self._overlay_step: Optional[str] = None   # step_id dont l'overlay est actif
+
         # Ordre et paramètres courants
         self._step_order:   list[str]       = [s.id for s in ALL_STEPS]
         self._step_enabled: dict[str, bool] = {
@@ -82,6 +85,7 @@ class MainApp(QMainWindow):
         self._ctrl.param_changed.connect(self._on_param_changed)
         self._ctrl.enabled_changed.connect(self._on_enabled_changed)
         self._ctrl.rerun_requested.connect(self._run_from)
+        self._ctrl.overlay_toggled.connect(self._on_overlay_toggled)
         splitter.addWidget(self._ctrl)
 
         # Zone d'affichage (droite)
@@ -206,6 +210,10 @@ class MainApp(QMainWindow):
         self._history.clear()
         self._active_run_id = None
         self._history_panel.clear()  # supprime tous les chips de l'image précédente
+
+        # Réinitialiser l'overlay si actif
+        self._overlay_step = None
+        self._ctrl.step_list.reset_overlays()
 
         # Bande vide : uniquement "Original"
         self._thumb_strip.rebuild([], {})
@@ -413,6 +421,47 @@ class MainApp(QMainWindow):
         )
 
     # ══════════════════════════════════════════════════════════════════════════
+    # Overlay détections (actif sans recalcul du pipeline)
+    # ══════════════════════════════════════════════════════════════════════════
+
+    @pyqtSlot(str, bool)
+    def _on_overlay_toggled(self, step_id: str, enabled: bool):
+        """Active/désactive l'overlay de détection sans relancer le pipeline."""
+        self._overlay_step = step_id if enabled else None
+        self._refresh_view_a()
+        self._update_view_labels()
+
+    def _build_overlay_img(self) -> Optional[np.ndarray]:
+        """Dessine les cercles de détection sur l'image originale.
+
+        · Cercle cyan fin   = zone de recherche (landmark RetinaFace)
+        · Point cyan        = centre exact du landmark
+        · Cercle vert épais = iris détecté comme rouge (si trouvé)
+        """
+        if self._original is None:
+            return None
+        detections: list[dict] = []
+        latest = self._history.latest()
+        if latest:
+            detections = latest.context.get("redeye_detections", [])
+
+        overlay = self._original.copy()
+        for det in detections:
+            sx, sy, sr = det.get("search", (0.0, 0.0, 0.0))
+            cv2.circle(overlay, (int(sx), int(sy)), max(int(sr), 2),
+                       (0, 200, 220), 1, cv2.LINE_AA)
+            cv2.circle(overlay, (int(sx), int(sy)), 2,
+                       (0, 220, 255), -1, cv2.LINE_AA)
+            iris = det.get("iris")
+            if iris is not None:
+                ix, iy, ir = iris
+                cv2.circle(overlay, (int(ix), int(iy)), max(int(ir), 3),
+                           (0, 220, 80), 2, cv2.LINE_AA)
+                cv2.circle(overlay, (int(ix), int(iy)), 1,
+                           (0, 255, 100), -1, cv2.LINE_AA)
+        return overlay
+
+    # ══════════════════════════════════════════════════════════════════════════
     # Navigation historique
     # ══════════════════════════════════════════════════════════════════════════
 
@@ -465,7 +514,10 @@ class MainApp(QMainWindow):
         self._refresh_view_b()
 
     def _refresh_view_a(self, preserve_zoom: bool = False):
-        img = self._get_image(*self._view_a)
+        if self._overlay_step is not None:
+            img = self._build_overlay_img()
+        else:
+            img = self._get_image(*self._view_a)
         self._view_a_widget.set_image(img, preserve_zoom)
 
     def _refresh_view_b(self, preserve_zoom: bool = False):
@@ -489,7 +541,12 @@ class MainApp(QMainWindow):
 
     def _update_view_labels(self):
         """Met à jour les labels des deux vues selon les sources courantes."""
-        self._view_a_lbl.setText(self._make_label_text("A", *self._view_a))
+        if self._overlay_step is not None:
+            step  = self._steps_by_id.get(self._overlay_step)
+            sname = step.short_name if step else self._overlay_step
+            self._view_a_lbl.setText(f"A — Overlay {sname}")
+        else:
+            self._view_a_lbl.setText(self._make_label_text("A", *self._view_a))
         if self._view_b is not None:
             self._view_b_lbl.setText(self._make_label_text("B", *self._view_b))
         else:

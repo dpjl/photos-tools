@@ -33,6 +33,7 @@ class StepBase:
     slow:              bool      = False
     param_defs:        list[dict] = []
     enabled_by_default: bool     = True   # False → étape décochée au démarrage
+    has_overlay:       bool      = False  # True → checkbox overlay sans recalcul
 
     def process(
         self,

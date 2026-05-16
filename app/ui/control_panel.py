@@ -20,6 +20,7 @@ class ControlPanel(QWidget):
     param_changed    = pyqtSignal(str, str, object)
     enabled_changed  = pyqtSignal(str, bool)
     rerun_requested  = pyqtSignal(str)           # step_id
+    overlay_toggled  = pyqtSignal(str, bool)     # (step_id, enabled) — sans recalcul
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -78,6 +79,7 @@ class ControlPanel(QWidget):
         self.step_list.param_changed.connect(self.param_changed)
         self.step_list.enabled_changed.connect(self.enabled_changed)
         self.step_list.rerun_requested.connect(self.rerun_requested)
+        self.step_list.overlay_toggled.connect(self.overlay_toggled)
 
         scroll.setWidget(self.step_list)
         root.addWidget(scroll, stretch=1)
