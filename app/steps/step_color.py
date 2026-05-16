@@ -9,10 +9,11 @@ from steps.base import StepBase
 
 
 class ColorStep(StepBase):
-    id         = "color"
-    name       = "1 · Correction couleur"
-    short_name = "Couleur"
-    slow       = False
+    id                 = "color"
+    name               = "1 · Correction couleur (manuelle)"
+    short_name         = "Couleur"
+    slow               = False
+    enabled_by_default = False
 
     param_defs = [
         {"key": "low_pct",    "label": "Pct. bas histogramme",  "type": "float",

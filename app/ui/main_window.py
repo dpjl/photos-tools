@@ -432,32 +432,47 @@ class MainApp(QMainWindow):
         self._update_view_labels()
 
     def _build_overlay_img(self) -> Optional[np.ndarray]:
-        """Dessine les cercles de détection sur l'image originale.
+        """Dessine les annotations de détection sur l'image originale.
 
-        · Cercle cyan fin   = zone de recherche (landmark RetinaFace)
-        · Point cyan        = centre exact du landmark
-        · Cercle vert épais = iris détecté comme rouge (si trouvé)
+        Dispatche selon le step_id dont l'overlay est actif.
         """
         if self._original is None:
             return None
-        detections: list[dict] = []
+        context: dict = {}
         latest = self._history.latest()
         if latest:
-            detections = latest.context.get("redeye_detections", [])
+            context = latest.context
 
         overlay = self._original.copy()
-        for det in detections:
-            iris = det.get("iris")
-            if iris is None:
-                continue
-            ix, iy, ir = iris
-            corrected = det.get("corrected", False)
-            # Vert = iris rouge corrigé  /  Cyan = iris détecté mais pas rouge
-            color = (0, 220, 80) if corrected else (0, 180, 200)
-            cv2.circle(overlay, (int(ix), int(iy)), max(int(ir), 2),
-                       color, 2, cv2.LINE_AA)
-            cv2.circle(overlay, (int(ix), int(iy)), 1,
-                       (0, 255, 150) if corrected else (0, 220, 240), -1, cv2.LINE_AA)
+
+        if self._overlay_step == "redeye":
+            for det in context.get("redeye_detections", []):
+                iris = det.get("iris")
+                if iris is None:
+                    continue
+                ix, iy, ir = iris
+                corrected = det.get("corrected", False)
+                color = (0, 220, 80) if corrected else (0, 180, 200)
+                cv2.circle(overlay, (int(ix), int(iy)), max(int(ir), 2),
+                           color, 2, cv2.LINE_AA)
+                cv2.circle(overlay, (int(ix), int(iy)), 1,
+                           (0, 255, 150) if corrected else (0, 220, 240), -1, cv2.LINE_AA)
+
+        elif self._overlay_step == "facehighlight":
+            for det in context.get("highlight_detections", []):
+                bbox = det.get("bbox")
+                if bbox is None:
+                    continue
+                x1, y1, x2, y2 = bbox
+                corrected = det.get("corrected", False)
+                overexp   = det.get("overexp", 0.0)
+                # Vert = visage corrigé  /  Orange = détecté mais pas assez surexposé
+                color = (0, 210, 70) if corrected else (0, 140, 220)
+                cv2.rectangle(overlay, (x1, y1), (x2, y2), color, 2, cv2.LINE_AA)
+                label = f"{overexp:.0%}"
+                cv2.putText(overlay, label, (x1 + 4, y1 + 18),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1, cv2.LINE_AA)
+
         return overlay
 
     # ══════════════════════════════════════════════════════════════════════════

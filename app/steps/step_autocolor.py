@@ -29,10 +29,10 @@ from steps.base import StepBase
 
 class AutoColorStep(StepBase):
     id                 = "autocolor"
-    name               = "6 · Auto niveaux & couleurs"
+    name               = "2 · Auto niveaux & couleurs"
     short_name         = "AutoColor"
     slow               = False
-    enabled_by_default = False   # désactivée par défaut
+    enabled_by_default = True    # activée par défaut
 
     param_defs = [
         {"key": "wb_strength", "label": "Balance blancs (force)", "type": "float",

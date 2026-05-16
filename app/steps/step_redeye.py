@@ -37,7 +37,7 @@ _MAX_BLOB_AREA     = 5000
 
 class RedEyeStep(StepBase):
     id                 = "redeye"
-    name               = "2 · Correction yeux rouges"
+    name               = "4 · Correction yeux rouges"
     short_name         = "YeuxRouges"
     slow               = True
     enabled_by_default = True

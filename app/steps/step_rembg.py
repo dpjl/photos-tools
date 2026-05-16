@@ -16,7 +16,7 @@ from steps.base import StepBase
 
 class RembgStep(StepBase):
     id         = "rembg"
-    name       = "5 · Cast argentique (rembg)"
+    name       = "7 · Cast argentique (rembg)"
     short_name = "Cast"
     slow       = True
 
