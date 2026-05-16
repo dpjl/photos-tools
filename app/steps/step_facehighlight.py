@@ -112,7 +112,14 @@ class FaceHighlightStep(StepBase):
 
         result = _shadows_highlights(img, highlights, hl_tonal, shadows, sh_tonal, radius)
         detections = _build_region_detections(img, hl_tonal)
-        return result, {"highlight_detections": detections}
+        extras: dict = {"highlight_detections": detections}
+        if auto_detect:
+            # Permet à l'UI de mettre à jour les sliders avec les valeurs effectives
+            extras["effective_params"] = {
+                "highlights":    highlights,
+                "hl_tonal_width": hl_tonal,
+            }
+        return result, extras
 
 
 # -- Detection automatique des parametres ------------------------------------

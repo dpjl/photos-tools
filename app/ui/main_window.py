@@ -387,6 +387,8 @@ class MainApp(QMainWindow):
         panel = self._ctrl.step_list.get_panel(step_id)
         if panel:
             panel.set_state("ok")
+            if "effective_params" in extras:
+                panel.set_params(extras["effective_params"])
         self._thumb_strip.update_image(step_id, img)
         # Mise à jour en direct de la vue A si elle cible cette étape
         if self._view_a[1] == step_id:
@@ -464,23 +466,12 @@ class MainApp(QMainWindow):
                 if bbox is None:
                     continue
                 x1, y1, x2, y2 = bbox
-                det_type  = det.get("type", "region")
                 overexp   = det.get("overexp", 0.0)
-                corrected = det.get("corrected", True)
-                if det_type == "face":
-                    # Visage : tirets fins en cyan/vert selon le taux de surexposition
-                    color = (0, 210, 90) if corrected else (0, 180, 200)
-                    cv2.rectangle(overlay, (x1, y1), (x2, y2), color, 1, cv2.LINE_AA)
-                    cv2.putText(overlay, f"visage {overexp:.0%}",
-                                (x1 + 3, y1 + 14),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.42, color, 1, cv2.LINE_AA)
-                else:
-                    # Région lumineuse : rectangle orange épais
-                    color = (0, 170, 255)   # orange (BGR)
-                    cv2.rectangle(overlay, (x1, y1), (x2, y2), color, 2, cv2.LINE_AA)
-                    cv2.putText(overlay, f"{overexp:.0%}",
-                                (x1 + 3, y1 + 17),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.50, color, 1, cv2.LINE_AA)
+                color = (0, 170, 255)
+                cv2.rectangle(overlay, (x1, y1), (x2, y2), color, 2, cv2.LINE_AA)
+                cv2.putText(overlay, f"{overexp:.0%}",
+                            (x1 + 3, y1 + 17),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.50, color, 1, cv2.LINE_AA)
 
         return overlay
 
