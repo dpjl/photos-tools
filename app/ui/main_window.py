@@ -447,18 +447,17 @@ class MainApp(QMainWindow):
 
         overlay = self._original.copy()
         for det in detections:
-            sx, sy, sr = det.get("search", (0.0, 0.0, 0.0))
-            cv2.circle(overlay, (int(sx), int(sy)), max(int(sr), 2),
-                       (0, 200, 220), 1, cv2.LINE_AA)
-            cv2.circle(overlay, (int(sx), int(sy)), 2,
-                       (0, 220, 255), -1, cv2.LINE_AA)
             iris = det.get("iris")
-            if iris is not None:
-                ix, iy, ir = iris
-                cv2.circle(overlay, (int(ix), int(iy)), max(int(ir), 3),
-                           (0, 220, 80), 2, cv2.LINE_AA)
-                cv2.circle(overlay, (int(ix), int(iy)), 1,
-                           (0, 255, 100), -1, cv2.LINE_AA)
+            if iris is None:
+                continue
+            ix, iy, ir = iris
+            corrected = det.get("corrected", False)
+            # Vert = iris rouge corrigé  /  Cyan = iris détecté mais pas rouge
+            color = (0, 220, 80) if corrected else (0, 180, 200)
+            cv2.circle(overlay, (int(ix), int(iy)), max(int(ir), 2),
+                       color, 2, cv2.LINE_AA)
+            cv2.circle(overlay, (int(ix), int(iy)), 1,
+                       (0, 255, 150) if corrected else (0, 220, 240), -1, cv2.LINE_AA)
         return overlay
 
     # ══════════════════════════════════════════════════════════════════════════
