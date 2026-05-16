@@ -29,7 +29,7 @@ from steps.base import StepBase
 
 class AutoColorStep(StepBase):
     id                 = "autocolor"
-    name               = "5 · Auto niveaux & couleurs"
+    name               = "6 · Auto niveaux & couleurs"
     short_name         = "AutoColor"
     slow               = False
     enabled_by_default = False   # désactivée par défaut

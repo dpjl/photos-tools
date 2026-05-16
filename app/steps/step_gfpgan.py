@@ -27,7 +27,7 @@ def _patch_basicsr_registry():
 
 class GFPGANStep(StepBase):
     id         = "gfpgan"
-    name       = "2 · Restauration visages (GFPGAN)"
+    name       = "3 · Restauration visages (GFPGAN)"
     short_name = "GFPGAN"
     slow       = True
 
