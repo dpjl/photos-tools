@@ -26,7 +26,8 @@ import numpy as np
 
 from steps.base import StepBase
 
-_IRIS_TO_IPD_RATIO = 0.105
+_IRIS_TO_IPD_RATIO = 0.105   # iris_r / distance inter-pupillaire (anatomique)
+_SEARCH_TO_IRIS    = 3.0     # search_r = iris_r × 3 → zone large pour trouver le rouge
 _MIN_IRIS_R        = 3.0
 _MIN_RED_PIXELS    = 5
 _MIN_R_VALUE       = 80
@@ -77,8 +78,9 @@ class RedEyeStep(StepBase):
         result     = img.copy()
         detections = []
         for (cx, cy, iris_r) in iris_circles:
-            corrected = _correct_iris(result, cx, cy, iris_r, sensitivity, strength, expand)
-            detections.append({"iris": (float(cx), float(cy), float(iris_r)),
+            corrected, fix_cx, fix_cy = _correct_iris(
+                result, cx, cy, iris_r, sensitivity, strength, expand)
+            detections.append({"iris": (float(fix_cx), float(fix_cy), float(iris_r)),
                                "corrected": corrected})
 
         return result, {"redeye_detections": detections}
@@ -127,36 +129,55 @@ def _fallback_iris_circles(img, sensitivity):
 
 
 def _correct_iris(result, cx, cy, iris_r, sensitivity, strength, expand):
-    """Corrige les yeux rouges dans le cercle iris. Modifie result in-place.
-    Retourne True si une correction a été appliquée, False si aucun rouge détecté.
+    """Correction en deux passes.
+
+    1. Zone de RECHERCHE large (search_r = iris_r × _SEARCH_TO_IRIS) autour du
+       landmark RetinaFace pour trouver les pixels rouges, même si le centre
+       détecté n'est pas exactement sur la pupille.
+    2. Centroïde des pixels rouges trouvés → nouveau centre réel de correction.
+    3. Masque gaussien (σ = iris_r) centré sur ce centroïde, cutoff dur à
+       corr_r = iris_r × expand.
+
+    Retourne (corrected: bool, final_cx: float, final_cy: float).
     """
-    h, w   = result.shape[:2]
-    corr_r = iris_r * expand
-    margin = int(corr_r) + 2
+    h, w     = result.shape[:2]
+    search_r = iris_r * _SEARCH_TO_IRIS      # zone de recherche (large, dynamique)
+    corr_r   = iris_r * expand               # zone de correction (anatomique)
+    margin   = int(search_r) + 2
     x1 = max(0, int(cx) - margin);  y1 = max(0, int(cy) - margin)
     x2 = min(w, int(cx) + margin);  y2 = min(h, int(cy) + margin)
     if x2 - x1 < 2 or y2 - y1 < 2:
-        return False
+        return False, cx, cy
 
     crop          = result[y1:y2, x1:x2].copy()
     B_c, G_c, R_c = cv2.split(crop)
     lcx, lcy      = cx - x1, cy - y1
     ch, cw        = crop.shape[:2]
     yy, xx        = np.mgrid[:ch, :cw]
-    dist_map      = np.sqrt((xx - lcx) ** 2 + (yy - lcy) ** 2)
+    dist_lm       = np.sqrt((xx - lcx) ** 2 + (yy - lcy) ** 2)
 
+    # Masque rouge (calculé une seule fois, réutilisé pour centroïde et correction)
     red_m = (
         (R_c.astype(np.int32) > G_c.astype(np.int32) * sensitivity) &
         (R_c.astype(np.int32) > B_c.astype(np.int32) * sensitivity) &
         (R_c > _MIN_R_VALUE)
     ).astype(np.float32)
 
-    if int((red_m * (dist_map <= corr_r).astype(np.float32)).sum()) < _MIN_RED_PIXELS:
-        return False
+    # Passe 1 : y a-t-il assez de rouge dans la zone de recherche ?
+    red_in_search = red_m * (dist_lm <= search_r).astype(np.float32)
+    total_red     = float(red_in_search.sum())
+    if total_red < _MIN_RED_PIXELS:
+        return False, cx, cy
 
-    sigma = max(iris_r / 2.0, 1.0)
-    gauss = np.exp(-0.5 * (dist_map / sigma) ** 2).astype(np.float32)
-    gauss[dist_map > corr_r] = 0.0
+    # Passe 2 : centroïde du rouge → centre réel de correction
+    rcx_local = float((red_in_search * xx).sum() / total_red)
+    rcy_local = float((red_in_search * yy).sum() / total_red)
+    dist_red  = np.sqrt((xx - rcx_local) ** 2 + (yy - rcy_local) ** 2)
+
+    # Gaussienne σ = iris_r, fort au centre, fondu naturel vers corr_r
+    sigma = max(iris_r, 1.0)
+    gauss = np.exp(-0.5 * (dist_red / sigma) ** 2).astype(np.float32)
+    gauss[dist_red > corr_r] = 0.0
 
     alpha = np.clip(gauss * red_m * strength, 0.0, 1.0)
     R_nat = (G_c.astype(np.float32) + B_c.astype(np.float32)) * 0.5
@@ -164,4 +185,4 @@ def _correct_iris(result, cx, cy, iris_r, sensitivity, strength, expand):
 
     crop[:, :, 2]         = np.clip(R_new, 0, 255).astype(np.uint8)
     result[y1:y2, x1:x2] = crop
-    return True
+    return True, rcx_local + x1, rcy_local + y1

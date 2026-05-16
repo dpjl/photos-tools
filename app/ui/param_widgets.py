@@ -3,9 +3,18 @@
 from __future__ import annotations
 from PyQt6.QtWidgets import (
     QWidget, QHBoxLayout, QLabel, QSlider, QDoubleSpinBox,
-    QSpinBox, QComboBox, QCheckBox, QSizePolicy,
+    QSpinBox, QComboBox, QCheckBox, QSizePolicy, QAbstractSpinBox,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
+
+# Correctif PyQt6/Windows : les boutons ↑↓ du spinbox peuvent être masqués
+# par la zone d'édition quand la largeur est contrainte. On force leur géométrie.
+_SPINBOX_BTN_STYLE = (
+    "QAbstractSpinBox::up-button   { subcontrol-origin: border;"
+    "  subcontrol-position: top right; width: 18px; }"
+    "QAbstractSpinBox::down-button { subcontrol-origin: border;"
+    "  subcontrol-position: bottom right; width: 18px; }"
+)
 
 
 class ParamRow(QWidget):
@@ -71,7 +80,7 @@ class ParamRow(QWidget):
                 self._spin.setRange(int(mn), int(mx))
                 self._spin.setValue(int(dflt))
                 self._spin.setSingleStep(int(step))
-                self._spin.setFixedWidth(60)
+                self._spin.setFixedWidth(68)
                 self._spin.valueChanged.connect(self._on_spin_changed_int)
             else:
                 self._spin = QDoubleSpinBox()
@@ -79,8 +88,9 @@ class ParamRow(QWidget):
                 self._spin.setDecimals(prec)
                 self._spin.setSingleStep(step)
                 self._spin.setValue(dflt)
-                self._spin.setFixedWidth(70)
+                self._spin.setFixedWidth(78)
                 self._spin.valueChanged.connect(self._on_spin_changed_float)
+            self._spin.setStyleSheet(_SPINBOX_BTN_STYLE)
             layout.addWidget(self._spin)
             self._combo = None
 
