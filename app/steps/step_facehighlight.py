@@ -1,32 +1,29 @@
-"""steps/step_facehighlight.py — Étape 3 · Correction hautes lumières (visages).
+"""steps/step_facehighlight.py — Étape 3 · Correction hautes lumières (global).
 
-Algorithme en 4 phases — conçu pour les portraits flash surexposés :
+Algorithme — traitement global de TOUTES les zones surexposées de l'image
+(visages, bras, objets proches) via séparation fréquentielle et inpainting :
 
-1. **Détection faciale** via RetinaFace (facexlib) → landmarks 5 points.
-   Chaque visage est évalué : si la fraction de pixels avec L* > seuil
-   dépasse _MIN_OVEREXP_FRACTION, il est corrigé.
+1. **Masque global** en espace LAB (L* 0-100 perceptuellement uniforme).
+   Transition smoothstep sur 10 L* unités pour éviter tout bord visible.
 
-2. **Courbe tonale en espace LAB** (shoulder Reinhard au-dessus du seuil L*).
-   Comprime la plage [seuil, 100] vers [seuil, L_max] avec une smoothstep
-   pour la transition — aucun artefact de bord, dérivée continue.
+2. **Séparation fréquentielle** (filtre bilatéral edge-preserving) :
+   · Couche base  = luminance basse fréquence (structures larges)
+   · Couche détail = L − base (texture fine, contours)
+   → Seule la couche base est comprimée ; la couche détail est préservée
+   (voire amplifiée) pour éviter l'aspect « lisse et plastique ».
 
-3. **Récupération de la couleur peau** — la zone surexposée perd sa teinte
-   chaude (blanchiment flash). On ré-injecte les valeurs a*/b* échantillonnées
-   dans la zone pré-seuil du même visage (ou une valeur de secours si la
-   zone de référence est trop petite). La correction est pondérée par hmask.
+3. **Compression tonale shoulder Reinhard** sur la couche base :
+   Mappe [seuil, 100] → [seuil, L_max] de façon continue (smoothstep).
+   Avec strength=1 : tout au-dessus du seuil → seuil (compression max).
+   Avec strength=0 : aucune compression.
 
-4. **Microcontraste** (CLAHE) sur le canal L* dans la zone corrigée,
-   pour restaurer la texture de peau que la compression tonale atténue.
+4. **Récupération de couleur via inpainting Telea** (cv2.INPAINT_TELEA) :
+   Les zones soufflées perdent leur couleur (a*,b* → 0 = blanc).
+   L'inpainting propage la couleur depuis les bords non-surexposés
+   vers l'intérieur. Fusion pondérée par masque × color_boost.
 
-Fusion finale : masque elliptique doux (landmarks → ellipse + blur gaussien)
-pour intégrer la correction dans l'image sans bord visible.
-
-Choix de l'approche LAB vs RGB direct :
-  · L* est perceptuellement uniforme → le seuil est intuitif (0-100)
-  · a*/b* séparent la couleur de la luminance → correction ciblée
-  · Le shoulder Reinhard est un classique de la photographie numérique
-    (Reinhard et al., "Photographic Tone Reproduction for Digital Images", 2002)
-    adapté ici en « local face highlight » au lieu de HDR global.
+La détection faciale (RetinaFace) sert uniquement à enrichir l'overlay
+(bbox de chaque visage + fraction de surexposition par visage).
 """
 
 from __future__ import annotations
@@ -35,12 +32,12 @@ import numpy as np
 
 from steps.base import StepBase
 
-_MIN_OVEREXP_FRACTION = 0.05   # ≥ 5 % du visage doit être surexposé
+_MIN_REGION_AREA = 300    # px² — ignorer les petites taches parasites
 
 
 class FaceHighlightStep(StepBase):
     id                 = "facehighlight"
-    name               = "3 · Hautes lumières visages"
+    name               = "3 · Correction hautes lumières"
     short_name         = "HautesLum"
     slow               = True
     enabled_by_default = False
@@ -48,17 +45,17 @@ class FaceHighlightStep(StepBase):
 
     param_defs = [
         {"key": "threshold",
-         "label": "Seuil hautes lumières (L*, 0-100)", "type": "int",
-         "default": 85, "min": 70, "max": 98, "step": 1},
+         "label": "Seuil luminosité (L*, 0-100)", "type": "int",
+         "default": 82, "min": 70, "max": 98, "step": 1},
         {"key": "strength",
-         "label": "Force correction luminosité", "type": "float",
-         "default": 0.80, "min": 0.10, "max": 1.0, "step": 0.05},
-        {"key": "recover_color",
-         "label": "Récupération couleur peau", "type": "float",
-         "default": 0.60, "min": 0.0, "max": 1.0, "step": 0.05},
+         "label": "Force de la compression", "type": "float",
+         "default": 0.75, "min": 0.10, "max": 1.0, "step": 0.05},
         {"key": "texture",
-         "label": "Restauration texture (CLAHE)", "type": "float",
-         "default": 0.40, "min": 0.0, "max": 1.0, "step": 0.05},
+         "label": "Restauration texture", "type": "float",
+         "default": 0.55, "min": 0.0, "max": 1.0, "step": 0.05},
+        {"key": "color_boost",
+         "label": "Récupération couleur", "type": "float",
+         "default": 0.60, "min": 0.0, "max": 1.0, "step": 0.05},
     ]
 
     def __init__(self):
@@ -76,180 +73,184 @@ class FaceHighlightStep(StepBase):
         return self._face_helper
 
     def process(self, img: np.ndarray, params: dict, context: dict):
-        threshold     = int(  params.get("threshold",     85))
-        strength      = float(params.get("strength",      0.80))
-        recover_color = float(params.get("recover_color", 0.60))
-        texture       = float(params.get("texture",       0.40))
+        threshold   = int(  params.get("threshold",   90))
+        strength    = float(params.get("strength",    0.75))
+        texture     = float(params.get("texture",     0.55))
+        color_boost = float(params.get("color_boost", 0.60))
 
-        result, detections = _detect_and_correct(
-            self._get_face_helper(), img, threshold, strength, recover_color, texture
+        result, detections = _correct_global(
+            img, threshold, strength, texture, color_boost,
+            self._get_face_helper(),
         )
         return result, {"highlight_detections": detections}
 
 
-# ── Détection et dispatch ──────────────────────────────────────────────────────
+# ── Traitement global ──────────────────────────────────────────────────────────
 
-def _detect_and_correct(
-    face_helper, img: np.ndarray,
-    threshold: int, strength: float, recover_color: float, texture: float,
-):
+def _correct_global(
+    img:         np.ndarray,
+    threshold:   int,
+    strength:    float,
+    texture:     float,
+    color_boost: float,
+    face_helper,
+) -> tuple[np.ndarray, list[dict]]:
+    """Applique la correction hautes lumières sur l'image entière."""
+
+    h, w = img.shape[:2]
+
+    # ── Conversion LAB ────────────────────────────────────────────────────────
+    lab  = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+    L_u8 = lab[:, :, 0]                                # uint8 [0, 255]
+    A_u8 = lab[:, :, 1]                                # uint8 offset +128
+    B_u8 = lab[:, :, 2]
+    L    = L_u8.astype(np.float32) / 255.0 * 100.0    # float [0, 100]
+    A    = A_u8.astype(np.float32) - 128.0             # float [-128, 127]
+    B    = B_u8.astype(np.float32) - 128.0
+
+    # ── Masque de surexposition (smoothstep sur 10 L* unités) ─────────────────
+    feather = 10.0
+    t_mask  = np.clip((L - threshold) / feather, 0.0, 1.0)
+    hmask   = t_mask * t_mask * (3.0 - 2.0 * t_mask)       # smoothstep ∈ [0,1]
+
+    overexp_fraction = float((L > threshold).mean())
+    if overexp_fraction < 0.001:
+        # Aucune zone surexposée : retourner l'image inchangée avec les infos visages
+        detections = _face_detections(face_helper, img, threshold)
+        return img, detections
+
+    # ── Compression tonale shoulder Reinhard (sur L original) ────────────────
+    # Mappe [threshold, 100] → [threshold, L_max] de façon continue (smoothstep).
+    # strength=1 → tout comprimé jusqu'au seuil.  strength=0 → aucun effet.
+    L_range = max(100.0 - threshold, 1.0)
+    L_max   = float(threshold) + L_range * (1.0 - strength)
+
+    t_tone  = np.clip((L - threshold) / L_range, 0.0, 1.0)
+    ts_tone = t_tone * t_tone * (3.0 - 2.0 * t_tone)       # smoothstep non-linéaire
+    L_compressed = float(threshold) + ts_tone * (L_max - float(threshold))
+
+    # Fusion : pixels non-surexposés inchangés, surexposés → L comprimé
+    L_new = L * (1.0 - hmask) + L_compressed * hmask
+
+    # ── Restauration de la texture (CLAHE sur le résultat comprimé) ──────────
+    # CLAHE redistribue le contraste local dans les zones comprimées, révélant
+    # les micro-détails subsistants sans amplifier le bruit hors-masque.
+    if texture > 0.0:
+        L_new_u8 = np.clip(L_new / 100.0 * 255.0, 0, 255).astype(np.uint8)
+        tile     = max(4, min(16, min(h, w) // 12))
+        clahe    = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(tile, tile))
+        L_clahe  = clahe.apply(L_new_u8).astype(np.float32) / 255.0 * 100.0
+        # Appliqué uniquement dans les zones corrigées
+        L_new = L_new * (1.0 - texture * hmask * 0.7) + L_clahe * (texture * hmask * 0.7)
+        L_new = np.clip(L_new, 0.0, 100.0)
+
+    # ── Récupération de couleur via inpainting ────────────────────────────────
+    if color_boost > 0.0:
+        blown_mask = (hmask > 0.3).astype(np.uint8) * 255
+        if blown_mask.any():
+            # Rayon d'inpainting : équilibre vitesse / propagation
+            inpaint_r = max(8, min(25, min(h, w) // 45))
+            A_inp = cv2.inpaint(A_u8, blown_mask, inpaint_r, cv2.INPAINT_TELEA)
+            B_inp = cv2.inpaint(B_u8, blown_mask, inpaint_r, cv2.INPAINT_TELEA)
+            A_inp_f = A_inp.astype(np.float32) - 128.0
+            B_inp_f = B_inp.astype(np.float32) - 128.0
+            # Fusion : zones soufflées reçoivent la couleur inpaintée
+            A_new = A + (A_inp_f - A) * hmask * color_boost
+            B_new = B + (B_inp_f - B) * hmask * color_boost
+        else:
+            A_new, B_new = A, B
+    else:
+        A_new, B_new = A, B
+
+    # ── Reconstruction BGR ────────────────────────────────────────────────────
+    L_out = np.clip(L_new / 100.0 * 255.0, 0, 255).astype(np.uint8)
+    A_out = np.clip(A_new + 128.0,          0, 255).astype(np.uint8)
+    B_out = np.clip(B_new + 128.0,          0, 255).astype(np.uint8)
+    result = cv2.cvtColor(cv2.merge([L_out, A_out, B_out]), cv2.COLOR_LAB2BGR)
+
+    # ── Détections pour overlay ───────────────────────────────────────────────
+    detections = _build_detections(hmask, img, face_helper, threshold,
+                                   overexp_fraction)
+    return result, detections
+
+
+# ── Overlay : régions lumineuses + visages ─────────────────────────────────────
+
+def _build_detections(
+    hmask: np.ndarray,
+    img:   np.ndarray,
+    face_helper,
+    threshold: int,
+    overexp_fraction: float,
+) -> list[dict]:
+    """Construit la liste de détections pour l'overlay."""
+    detections: list[dict] = []
+
+    # Composantes connexes des zones surexposées (bboxes pour overlay)
+    blown_u8 = (hmask > 0.4).astype(np.uint8) * 255
+    if blown_u8.any():
+        n_labels, _labels, stats, _ = cv2.connectedComponentsWithStats(blown_u8)
+        for i in range(1, n_labels):
+            area = int(stats[i, cv2.CC_STAT_AREA])
+            if area < _MIN_REGION_AREA:
+                continue
+            x1 = int(stats[i, cv2.CC_STAT_LEFT])
+            y1 = int(stats[i, cv2.CC_STAT_TOP])
+            x2 = x1 + int(stats[i, cv2.CC_STAT_WIDTH])
+            y2 = y1 + int(stats[i, cv2.CC_STAT_HEIGHT])
+            detections.append({
+                "type":      "region",
+                "bbox":      (x1, y1, x2, y2),
+                "area":      area,
+                "overexp":   overexp_fraction,
+                "corrected": True,
+            })
+
+    # Visages : fraction de surexposition par visage (info complémentaire)
+    for fd in _face_detections(face_helper, img, threshold):
+        detections.append(fd)
+
+    return detections
+
+
+def _face_detections(face_helper, img: np.ndarray, threshold: int) -> list[dict]:
+    """Détecte les visages et calcule leur taux de surexposition."""
     try:
         face_helper.clean_all()
         face_helper.read_image(img)
         face_helper.get_face_landmarks_5(only_center_face=False, eye_dist_threshold=5)
     except Exception:
-        return img, []
+        return []
 
     if not face_helper.all_landmarks_5:
-        return img, []
+        return []
 
-    result:     np.ndarray  = img.copy()
-    detections: list[dict]  = []
-
+    out: list[dict] = []
     for lm5 in face_helper.all_landmarks_5:
         lm   = np.array(lm5)
         bbox = _bbox_from_landmarks(lm, img.shape)
         x1, y1, x2, y2 = bbox
         if x2 - x1 < 10 or y2 - y1 < 10:
             continue
-
-        face_crop = result[y1:y2, x1:x2].copy()
-
-        # Score de surexposition (fraction de pixels > seuil L*)
-        L_ch      = cv2.cvtColor(face_crop, cv2.COLOR_BGR2LAB)[:, :, 0]
-        L_f       = L_ch.astype(np.float32) / 255.0 * 100.0
-        overexp   = float((L_f > threshold).mean())
-
-        if overexp < _MIN_OVEREXP_FRACTION:
-            detections.append({
-                "bbox":      (x1, y1, x2, y2),
-                "corrected": False,
-                "overexp":   overexp,
-            })
-            continue
-
-        # Correction + masque de fusion
-        corrected_crop = _correct_highlights(face_crop, threshold, strength,
-                                             recover_color, texture)
-        face_mask      = _face_blend_mask(face_crop.shape, lm, x1, y1)
-        blended        = (
-            face_crop.astype(np.float32) * (1.0 - face_mask[..., None])
-            + corrected_crop.astype(np.float32) * face_mask[..., None]
-        )
-        result[y1:y2, x1:x2] = np.clip(blended, 0, 255).astype(np.uint8)
-
-        detections.append({
+        face_crop = img[y1:y2, x1:x2]
+        L_crop    = cv2.cvtColor(face_crop, cv2.COLOR_BGR2LAB)[:, :, 0]
+        overexp   = float((L_crop.astype(np.float32) / 255.0 * 100.0 > threshold).mean())
+        out.append({
+            "type":      "face",
             "bbox":      (x1, y1, x2, y2),
-            "corrected": True,
             "overexp":   overexp,
+            "corrected": overexp >= 0.05,
         })
+    return out
 
-    return result, detections
-
-
-# ── Géométrie faciale ─────────────────────────────────────────────────────────
 
 def _bbox_from_landmarks(lm: np.ndarray, img_shape: tuple) -> tuple[int, int, int, int]:
-    """Bbox du visage estimée depuis les 5 landmarks RetinaFace.
-
-    Les yeux (lm[0]=gauche, lm[1]=droite) se trouvent à ≈35 % depuis le haut.
-    On étend d'1.8× la distance inter-yeux vers le haut (front) et 2.2× vers
-    le bas (menton) pour inclure le visage entier.
-    """
-    h, w       = img_shape[:2]
-    eye_dist   = float(np.linalg.norm(lm[1] - lm[0]))
-    eye_cx     = float((lm[0][0] + lm[1][0]) / 2)
-    eye_cy     = float((lm[0][1] + lm[1][1]) / 2)
+    h, w     = img_shape[:2]
+    eye_dist = float(np.linalg.norm(lm[1] - lm[0]))
+    eye_cx   = float((lm[0][0] + lm[1][0]) / 2)
+    eye_cy   = float((lm[0][1] + lm[1][1]) / 2)
     x1 = max(0, int(eye_cx - eye_dist * 1.45))
     y1 = max(0, int(eye_cy - eye_dist * 1.80))
     x2 = min(w, int(eye_cx + eye_dist * 1.45))
     y2 = min(h, int(eye_cy + eye_dist * 2.20))
     return x1, y1, x2, y2
-
-
-def _face_blend_mask(
-    shape: tuple, lm: np.ndarray, offset_x: int, offset_y: int
-) -> np.ndarray:
-    """Masque elliptique doux pour fusionner la correction dans l'image.
-
-    Centré sur le barycentre des 5 landmarks, dimensions proportionnelles
-    à la distance inter-yeux. Flou gaussien pour éviter un bord visible.
-    """
-    h, w     = shape[:2]
-    mask     = np.zeros((h, w), dtype=np.float32)
-    lm_local = lm - np.array([offset_x, offset_y])
-    eye_dist = float(np.linalg.norm(lm_local[1] - lm_local[0]))
-    center   = np.mean(lm_local, axis=0)
-    cx, cy   = int(center[0]), int(center[1])
-    rx       = max(1, int(eye_dist * 1.30))
-    ry       = max(1, int(eye_dist * 1.75))
-    cv2.ellipse(mask, (cx, cy), (rx, ry), 0, 0, 360, 1.0, -1)
-    sigma    = max(eye_dist * 0.25, 3.0)
-    mask     = cv2.GaussianBlur(mask, (0, 0), sigmaX=sigma)
-    return np.clip(mask, 0, 1)
-
-
-# ── Correction hautes lumières ─────────────────────────────────────────────────
-
-def _correct_highlights(
-    face_crop:     np.ndarray,
-    threshold:     int,
-    strength:      float,
-    recover_color: float,
-    texture_str:   float,
-) -> np.ndarray:
-    """Corrige les hautes lumières dans un crop de visage.
-
-    L_max = threshold + (100-threshold)*(1 - strength*0.70)
-    Shoulder Reinhard via smoothstep sur [threshold, 100] → [threshold, L_max].
-    Transition progressive sur 8 unités L* pour éviter toute discontinuité.
-    """
-    lab = cv2.cvtColor(face_crop, cv2.COLOR_BGR2LAB)
-    L   = lab[:, :, 0].astype(np.float32) / 255.0 * 100.0   # [0, 100]
-    A   = lab[:, :, 1].astype(np.float32) - 128.0            # [-128, 127]
-    Bch = lab[:, :, 2].astype(np.float32) - 128.0
-
-    # ── Masque de surexposition : transition smoothstep sur 8 L* units ──────
-    t_mask = np.clip((L - threshold) / 8.0, 0.0, 1.0)
-    hmask  = t_mask * t_mask * (3.0 - 2.0 * t_mask)         # smoothstep ∈ [0,1]
-
-    # ── Couleur de peau de référence (zone pré-seuil : [threshold-12, threshold[) ─
-    good_px = (L >= float(threshold - 12)) & (L < float(threshold))
-    if good_px.sum() >= 25:
-        a_ref = float(np.median(A[good_px]))
-        b_ref = float(np.median(Bch[good_px]))
-    else:
-        # Secours : teint peau caucasien clair sous illuminant D65 (LAB)
-        a_ref, b_ref = 7.0, 11.0
-
-    # ── Courbe tonale : shoulder Reinhard (smoothstep au-dessus du seuil) ────
-    # Mappe [threshold, 100] → [threshold, L_max] de façon continue.
-    L_max  = float(threshold) + (100.0 - threshold) * (1.0 - strength * 0.70)
-    t_tone = np.clip((L - threshold) / (100.0 - threshold + 1e-6), 0.0, 1.0)
-    t_s    = t_tone * t_tone * (3.0 - 2.0 * t_tone)  # smoothstep non-linéaire
-    L_red  = float(threshold) + t_s * (L_max - float(threshold))
-    L_fin  = L * (1.0 - hmask) + L_red * hmask         # blend : orig → réduit
-
-    # ── Récupération couleur peau ─────────────────────────────────────────────
-    A_fin  = A   + (a_ref - A)   * hmask * recover_color
-    B_fin  = Bch + (b_ref - Bch) * hmask * recover_color
-
-    # ── Reconstruction LAB → BGR (uint8) ─────────────────────────────────────
-    L_u8  = np.clip(L_fin / 100.0 * 255.0, 0, 255).astype(np.uint8)
-    A_u8  = np.clip(A_fin  + 128.0,         0, 255).astype(np.uint8)
-    B_u8  = np.clip(B_fin  + 128.0,         0, 255).astype(np.uint8)
-    corrected = cv2.cvtColor(cv2.merge([L_u8, A_u8, B_u8]), cv2.COLOR_LAB2BGR)
-
-    # ── Restauration texture via CLAHE (pondérée par hmask) ───────────────────
-    if texture_str > 0.0:
-        lab2     = cv2.cvtColor(corrected, cv2.COLOR_BGR2LAB)
-        tile     = max(4, min(16, min(face_crop.shape[:2]) // 12))
-        clahe    = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(tile, tile))
-        L_eq     = clahe.apply(lab2[:, :, 0]).astype(np.float32)
-        L_old    = lab2[:, :, 0].astype(np.float32)
-        lab2[:, :, 0] = np.clip(
-            L_old + (L_eq - L_old) * hmask * texture_str, 0, 255
-        ).astype(np.uint8)
-        corrected = cv2.cvtColor(lab2, cv2.COLOR_LAB2BGR)
-
-    return corrected

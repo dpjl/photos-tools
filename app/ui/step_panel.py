@@ -195,7 +195,7 @@ class StepPanel(QWidget):
             )
             body_layout.addWidget(self._overlay_cb)
 
-        # Bouton Recalculer
+        # Bouton Recalculer + bouton Rétablir les défauts
         btn_row = QHBoxLayout()
         btn_row.setContentsMargins(0, 4, 0, 0)
         self._rerun_btn = QPushButton("▶  Recalculer depuis ici")
@@ -206,6 +206,15 @@ class StepPanel(QWidget):
         self._rerun_btn.clicked.connect(lambda: self.rerun_requested.emit(self._step.id))
         btn_row.addWidget(self._rerun_btn)
         btn_row.addStretch()
+        self._reset_btn = QPushButton("↺ Défaut")
+        self._reset_btn.setStyleSheet(
+            "QPushButton { background: #2e2a3a; color: #99a; border-radius: 4px;"
+            "  padding: 4px 10px; font-size: 11px; }"
+            "QPushButton:hover { background: #3e3a5a; color: #bbccff; }"
+        )
+        self._reset_btn.setToolTip("Rétablir les valeurs par défaut")
+        self._reset_btn.clicked.connect(self._reset_params)
+        btn_row.addWidget(self._reset_btn)
         body_layout.addLayout(btn_row)
 
         self._body.setVisible(False)
@@ -250,6 +259,17 @@ class StepPanel(QWidget):
             self._overlay_cb.blockSignals(True)
             self._overlay_cb.setChecked(False)
             self._overlay_cb.blockSignals(False)
+
+    def _reset_params(self):
+        """Rétablit toutes les valeurs par défaut et marque l'étape comme obsolète."""
+        for pdef in self._step.param_defs:
+            row = self._param_rows.get(pdef["key"])
+            if row is not None:
+                row.set_value(pdef["default"])
+        # Marquer l'étape comme stale via un param_changed sur le premier paramètre
+        if self._step.param_defs:
+            first = self._step.param_defs[0]
+            self.param_changed.emit(self._step.id, first["key"], first["default"])
 
     # ── Interne ──────────────────────────────────────────────────────────────
 
