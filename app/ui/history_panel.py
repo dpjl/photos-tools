@@ -129,6 +129,14 @@ class HistoryPanel(QWidget):
         if run_id is not None and run_id in self._chips:
             self._chips[run_id].set_active(True)
 
+    def clear(self):
+        """Supprime tous les chips (nouvelle image chargée)."""
+        for chip in self._chips.values():
+            self._inner_layout.removeWidget(chip)
+            chip.deleteLater()
+        self._chips.clear()
+        self._active_id = None
+
     # ── Slot ─────────────────────────────────────────────────────────────────
 
     def _on_activate(self, run_id: int):

@@ -136,7 +136,7 @@ class StepPanel(QWidget):
 
         # Checkbox activer/désactiver
         self._enable_cb = QCheckBox()
-        self._enable_cb.setChecked(True)
+        self._enable_cb.setChecked(getattr(self._step, "enabled_by_default", True))
         self._enable_cb.setStyleSheet("margin-right: 4px;")
         self._enable_cb.toggled.connect(
             lambda v: self.enabled_changed.emit(self._step.id, v)

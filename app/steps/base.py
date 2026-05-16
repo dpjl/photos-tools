@@ -27,11 +27,12 @@ class StepBase:
         }
     """
 
-    id:         str       = ""
-    name:       str       = ""
-    short_name: str       = ""
-    slow:       bool      = False
-    param_defs: list[dict] = []
+    id:                str       = ""
+    name:              str       = ""
+    short_name:        str       = ""
+    slow:              bool      = False
+    param_defs:        list[dict] = []
+    enabled_by_default: bool     = True   # False → étape décochée au démarrage
 
     def process(
         self,

@@ -45,7 +45,9 @@ class MainApp(QMainWindow):
 
         # Ordre et paramètres courants
         self._step_order:   list[str]       = [s.id for s in ALL_STEPS]
-        self._step_enabled: dict[str, bool] = {s.id: True for s in ALL_STEPS}
+        self._step_enabled: dict[str, bool] = {
+            s.id: getattr(s, "enabled_by_default", True) for s in ALL_STEPS
+        }
 
         self._steps_by_id = {s.id: s for s in ALL_STEPS}
 
@@ -203,7 +205,7 @@ class MainApp(QMainWindow):
         self._original_path = path
         self._history.clear()
         self._active_run_id = None
-        self._history_panel.set_active(None)
+        self._history_panel.clear()  # supprime tous les chips de l'image précédente
 
         # Bande vide : uniquement "Original"
         self._thumb_strip.rebuild([], {})

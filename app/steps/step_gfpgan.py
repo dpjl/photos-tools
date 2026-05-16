@@ -3,6 +3,7 @@
 from __future__ import annotations
 import os
 import sys
+import cv2
 import numpy as np
 
 from steps.base import StepBase
@@ -31,9 +32,7 @@ class GFPGANStep(StepBase):
     slow       = True
 
     param_defs = [
-        {"key": "upscale", "label": "Upscale (×)", "type": "int",
-         "default": 1, "min": 1, "max": 2, "step": 1},
-        {"key": "weight",  "label": "Poids GFPGAN (0=source, 1=GFPGAN)", "type": "float",
+        {"key": "weight", "label": "Poids GFPGAN (0=source, 1=plein effet)", "type": "float",
          "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05},
     ]
 
@@ -57,18 +56,24 @@ class GFPGANStep(StepBase):
 
     def process(self, img: np.ndarray, params: dict, context: dict):
         self._load()
-        upscale = int(params.get("upscale", 1))
-        weight  = float(params.get("weight", 0.5))
+        weight = float(params.get("weight", 0.5))
 
+        # Note : GFPGANv1Clean ignore silencieusement le paramètre `weight`
+        # passé à enhance() (il est absorbé par **kwargs sans effet).
+        # On passe donc weight=1.0 au modèle et on applique le mélange manuellement.
         _, _, result = self._restorer.enhance(
             img,
             has_aligned=False,
             only_center_face=False,
             paste_back=True,
-            weight=weight,
+            weight=1.0,
         )
         if result is None:
             return img, {"face_bboxes": []}
+
+        # Mélange manuel : weight=1 → sortie GFPGAN pure, weight=0 → image d'origine
+        if weight < 1.0 and result.shape == img.shape:
+            result = cv2.addWeighted(result, weight, img, 1.0 - weight, 0)
 
         # Extraire les bboxes depuis le face_helper de GFPGAN (déjà calculées par enhance())
         face_bboxes = _extract_face_bboxes(self._restorer)
