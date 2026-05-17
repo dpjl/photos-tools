@@ -16,6 +16,9 @@ timm>=0.9.0
 thop>=0.1.0
 einops>=0.6.0
 
+# MediaPipe (iris landmarks — correction yeux rouges)
+mediapipe>=0.10.0
+
 # Segmentation arrière-plan
 rembg>=2.0.50
 onnxruntime>=1.15.0
