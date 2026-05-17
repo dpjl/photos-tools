@@ -54,6 +54,9 @@ class MainApp(QMainWindow):
 
         self._steps_by_id = {s.id: s for s in ALL_STEPS}
 
+        # Images des etapes du dernier run (pour l'editeur de masque)
+        self._last_step_images: dict[str, np.ndarray] = {}
+
         self._build_ui()
         self._apply_theme()
         self._setup_shortcuts()
@@ -86,6 +89,9 @@ class MainApp(QMainWindow):
         self._ctrl.enabled_changed.connect(self._on_enabled_changed)
         self._ctrl.rerun_requested.connect(self._run_from)
         self._ctrl.overlay_toggled.connect(self._on_overlay_toggled)
+        self._ctrl.mask_edit_requested.connect(self._on_mask_edit_requested)
+        self._ctrl.color_picker_requested.connect(self._on_color_picker_requested)
+        self._ctrl.color_picker_requested.connect(self._on_color_picker_requested)
         splitter.addWidget(self._ctrl)
 
         # Zone d'affichage (droite)
@@ -208,6 +214,7 @@ class MainApp(QMainWindow):
         self._original      = img
         self._original_path = path
         self._history.clear()
+        self._last_step_images.clear()
         self._active_run_id = None
         self._history_panel.clear()  # supprime tous les chips de l'image précédente
 
@@ -384,6 +391,7 @@ class MainApp(QMainWindow):
 
     @pyqtSlot(str, object, dict)
     def _on_step_done(self, step_id: str, img: np.ndarray, extras: dict):
+        self._last_step_images[step_id] = img
         panel = self._ctrl.step_list.get_panel(step_id)
         if panel:
             panel.set_state("ok")
@@ -432,6 +440,65 @@ class MainApp(QMainWindow):
         self._overlay_step = step_id if enabled else None
         self._refresh_view_a()
         self._update_view_labels()
+
+    @pyqtSlot(str)
+    def _on_mask_edit_requested(self, step_id: str):
+        """Ouvre l'éditeur de masque pour l'étape step_id."""
+        from PyQt6.QtWidgets import QDialog
+        from ui.mask_editor import MaskEditorDialog
+
+        step = self._steps_by_id.get(step_id)
+        if step is None or not hasattr(step, "set_mask"):
+            return
+        img = self._get_step_input_image(step_id)
+        if img is None:
+            self._status_bar.showMessage("Ouvrez une image avant de peindre le masque.")
+            return
+        dlg = MaskEditorDialog(self, img, step.get_mask())
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            step.set_mask(dlg.get_mask())
+            self._status_bar.showMessage(f"Masque mis à jour pour « {step.name} ».")
+
+    @pyqtSlot(str)
+    def _on_color_picker_requested(self, step_id: str):
+        """Ouvre la pipette de balance des blancs pour l'étape step_id."""
+        from PyQt6.QtWidgets import QDialog
+        from ui.wb_picker import WBPickerDialog
+
+        step = self._steps_by_id.get(step_id)
+        if step is None or not hasattr(step, "set_pick_point"):
+            return
+        img = self._get_step_input_image(step_id)
+        if img is None:
+            self._status_bar.showMessage(
+                "Ouvrez une image avant de sélectionner le point blanc."
+            )
+            return
+        dlg = WBPickerDialog(self, img, step.get_pick_point())
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            pt = dlg.get_pick_point()
+            if pt is not None:
+                radius = dlg.get_patch_radius()
+                step.set_pick_point(*pt)
+                panel = self._ctrl.step_list.get_panel(step_id)
+                if panel is not None:
+                    panel.set_params({"patch_radius": radius})
+                self._status_bar.showMessage(
+                    f"Point blanc sélectionné en ({pt[0]}, {pt[1]}) — « {step.name} »."
+                )
+            else:
+                step.clear_pick_point()
+                self._status_bar.showMessage(f"Sélection effacée pour « {step.name} ».")
+
+    def _get_step_input_image(self, step_id: str) -> np.ndarray | None:
+        """Retourne l'image en entrée de l'étape step_id (sortie de la précédente)."""
+        order = self._ctrl.step_list.get_order()
+        idx   = order.index(step_id) if step_id in order else -1
+        if idx > 0:
+            img = self._last_step_images.get(order[idx - 1])
+        else:
+            img = None
+        return img if img is not None else self._original
 
     def _build_overlay_img(self) -> Optional[np.ndarray]:
         """Dessine les annotations de détection sur l'image originale.

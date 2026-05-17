@@ -91,11 +91,13 @@ _STATE_LABELS = {
 class StepPanel(QWidget):
     """Panneau d'une étape : en-tête + corps pliable."""
 
-    enabled_changed  = pyqtSignal(str, bool)         # (step_id, enabled)
-    param_changed    = pyqtSignal(str, str, object)  # (step_id, key, value)
-    rerun_requested  = pyqtSignal(str)               # step_id
-    drag_requested   = pyqtSignal(str)               # step_id — relayé depuis DragHandle
-    overlay_toggled  = pyqtSignal(str, bool)          # (step_id, enabled) — sans recalcul
+    enabled_changed     = pyqtSignal(str, bool)         # (step_id, enabled)
+    param_changed       = pyqtSignal(str, str, object)  # (step_id, key, value)
+    rerun_requested     = pyqtSignal(str)               # step_id
+    drag_requested      = pyqtSignal(str)               # step_id — relayé depuis DragHandle
+    overlay_toggled     = pyqtSignal(str, bool)          # (step_id, enabled) — sans recalcul
+    mask_edit_requested = pyqtSignal(str)               # step_id — ouvrir l'éditeur de masque
+    color_picker_requested = pyqtSignal(str)            # step_id — ouvrir la pipette WB
 
     def __init__(self, step, parent=None):
         super().__init__(parent)
@@ -194,6 +196,42 @@ class StepPanel(QWidget):
                 lambda v, sid=self._step.id: self.overlay_toggled.emit(sid, v)
             )
             body_layout.addWidget(self._overlay_cb)
+
+        # Bouton Peindre le masque (seulement si has_mask_editor=True)
+        if getattr(self._step, "has_mask_editor", False):
+            sep_mask = QFrame()
+            sep_mask.setFrameShape(QFrame.Shape.HLine)
+            sep_mask.setStyleSheet("background: #2a2a3a; margin: 2px 0;")
+            sep_mask.setFixedHeight(1)
+            body_layout.addWidget(sep_mask)
+            btn_mask = QPushButton("🖌  Peindre le masque")
+            btn_mask.setStyleSheet(
+                "QPushButton { background: #1e3a52; color: #b8e0f7; border-radius: 4px;"
+                "  padding: 5px 12px; font-size: 11px; }"
+                "QPushButton:hover { background: #2a5577; }"
+            )
+            btn_mask.clicked.connect(
+                lambda: self.mask_edit_requested.emit(self._step.id)
+            )
+            body_layout.addWidget(btn_mask)
+
+        # Bouton Selectionner point blanc (seulement si has_color_picker=True)
+        if getattr(self._step, "has_color_picker", False):
+            sep_wb = QFrame()
+            sep_wb.setFrameShape(QFrame.Shape.HLine)
+            sep_wb.setStyleSheet("background: #2a2a3a; margin: 2px 0;")
+            sep_wb.setFixedHeight(1)
+            body_layout.addWidget(sep_wb)
+            btn_wb = QPushButton("🎯  Sélectionner point blanc")
+            btn_wb.setStyleSheet(
+                "QPushButton { background: #1e3a52; color: #b8e0f7; border-radius: 4px;"
+                "  padding: 5px 12px; font-size: 11px; }"
+                "QPushButton:hover { background: #2a5577; }"
+            )
+            btn_wb.clicked.connect(
+                lambda: self.color_picker_requested.emit(self._step.id)
+            )
+            body_layout.addWidget(btn_wb)
 
         # Bouton Recalculer + bouton Rétablir les défauts
         btn_row = QHBoxLayout()
@@ -298,11 +336,13 @@ class StepPanel(QWidget):
 class StepListWidget(QWidget):
     """Conteneur des StepPanels avec réordonnancement par drag-and-drop."""
 
-    order_changed    = pyqtSignal(list)           # list[str] nouvel ordre des step_ids
-    param_changed    = pyqtSignal(str, str, object)
-    enabled_changed  = pyqtSignal(str, bool)
-    rerun_requested  = pyqtSignal(str)
-    overlay_toggled  = pyqtSignal(str, bool)      # relayé depuis les panneaux
+    order_changed        = pyqtSignal(list)           # list[str] nouvel ordre des step_ids
+    param_changed        = pyqtSignal(str, str, object)
+    enabled_changed      = pyqtSignal(str, bool)
+    rerun_requested      = pyqtSignal(str)
+    overlay_toggled      = pyqtSignal(str, bool)      # relayé depuis les panneaux
+    mask_edit_requested  = pyqtSignal(str)            # relayé depuis les panneaux
+    color_picker_requested = pyqtSignal(str)          # relayé depuis les panneaux
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -335,6 +375,8 @@ class StepListWidget(QWidget):
             panel.enabled_changed.connect(self.enabled_changed)
             panel.rerun_requested.connect(self.rerun_requested)
             panel.overlay_toggled.connect(self.overlay_toggled)
+            panel.mask_edit_requested.connect(self.mask_edit_requested)
+            panel.color_picker_requested.connect(self.color_picker_requested)
             self._panels[step.id] = panel
             self._order.append(step.id)
             self._vbox.insertWidget(len(self._order) - 1, panel)

@@ -14,13 +14,15 @@ from ui.step_panel import StepListWidget
 class ControlPanel(QWidget):
     """Panneau gauche : bouton Run + liste des étapes paramétrables."""
 
-    run_requested    = pyqtSignal()
-    stop_requested   = pyqtSignal()
-    order_changed    = pyqtSignal(list)          # list[str]
-    param_changed    = pyqtSignal(str, str, object)
-    enabled_changed  = pyqtSignal(str, bool)
-    rerun_requested  = pyqtSignal(str)           # step_id
-    overlay_toggled  = pyqtSignal(str, bool)     # (step_id, enabled) — sans recalcul
+    run_requested        = pyqtSignal()
+    stop_requested       = pyqtSignal()
+    order_changed        = pyqtSignal(list)          # list[str]
+    param_changed        = pyqtSignal(str, str, object)
+    enabled_changed      = pyqtSignal(str, bool)
+    rerun_requested      = pyqtSignal(str)           # step_id
+    overlay_toggled      = pyqtSignal(str, bool)     # (step_id, enabled) — sans recalcul
+    mask_edit_requested  = pyqtSignal(str)           # step_id — ouvrir l'éditeur de masque
+    color_picker_requested = pyqtSignal(str)         # step_id — ouvrir la pipette WB
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -80,6 +82,8 @@ class ControlPanel(QWidget):
         self.step_list.enabled_changed.connect(self.enabled_changed)
         self.step_list.rerun_requested.connect(self.rerun_requested)
         self.step_list.overlay_toggled.connect(self.overlay_toggled)
+        self.step_list.mask_edit_requested.connect(self.mask_edit_requested)
+        self.step_list.color_picker_requested.connect(self.color_picker_requested)
 
         scroll.setWidget(self.step_list)
         root.addWidget(scroll, stretch=1)

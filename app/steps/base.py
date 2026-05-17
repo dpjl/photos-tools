@@ -34,6 +34,9 @@ class StepBase:
     param_defs:        list[dict] = []
     enabled_by_default: bool     = True   # False → étape décochée au démarrage
     has_overlay:       bool      = False  # True → checkbox overlay sans recalcul
+    has_mask_editor:   bool      = False  # True → bouton « Peindre le masque »
+    has_color_picker:  bool      = False  # True → bouton « Sélectionner point blanc »
+    has_color_picker:  bool      = False  # True → bouton « Sélectionner point blanc »
 
     def process(
         self,
