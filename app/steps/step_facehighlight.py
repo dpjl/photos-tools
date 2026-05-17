@@ -35,10 +35,10 @@ _MIN_REGION_AREA = 400
 
 class FaceHighlightStep(StepBase):
     id = "facehighlight"
-    name = "3 - Correction hautes lumieres"
+    name = "Correction hautes lumières"
     short_name = "HautesLum"
     slow = True
-    enabled_by_default = False
+    enabled_by_default = True
     has_overlay = True
 
     param_defs = [

@@ -17,7 +17,7 @@ from config import SCUNET_MODELS_DIR
 
 class SCUNetStep(StepBase):
     id         = "scunet"
-    name       = "6 · Embellissement SCUNet"
+    name       = "Embellissement SCUNet"
     short_name = "SCUNet"
     slow       = True
 

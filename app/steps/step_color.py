@@ -10,7 +10,7 @@ from steps.base import StepBase
 
 class ColorStep(StepBase):
     id                 = "color"
-    name               = "1 · Correction couleur (manuelle)"
+    name               = "Correction couleur (manuelle)"
     short_name         = "Couleur"
     slow               = False
     enabled_by_default = False

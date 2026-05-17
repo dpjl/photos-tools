@@ -16,9 +16,10 @@ from steps.base import StepBase
 
 class RembgStep(StepBase):
     id         = "rembg"
-    name       = "7 · Cast argentique (rembg)"
-    short_name = "Cast"
-    slow       = True
+    name               = "Cast argentique"
+    short_name         = "Cast"
+    slow               = True
+    enabled_by_default = False
 
     param_defs = [
         {"key": "strength_a", "label": "Force canal a* (rouge)",  "type": "float",

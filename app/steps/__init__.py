@@ -13,16 +13,16 @@ from steps.step_lightleak      import LightLeakStep
 
 # Instances singleton — partagées dans toute l'application
 ALL_STEPS = [
-    ColorStep(),           # 1 · Correction couleur (manuelle)  — désactivée par défaut
-    WhiteBalanceStep(),    # 2 · Balance des blancs (pipette)    — désactivée par défaut
-    AutoColorStep(),       # 3 · Auto niveaux & couleurs         — activée par défaut
-    LightLeakStep(),       #   · Lumière parasite (Color Transfer LAB) — désactivée par défaut
-    FaceHighlightStep(),   # 4 · Correction hautes lumières      — désactivée par défaut
-    InpaintStep(),         # 5 · Retouche inpainting (LaMa)      — désactivée par défaut
-    RedEyeStep(),          # 6 · Correction yeux rouges
-    GFPGANStep(),          # 7 · Restauration visages (GFPGAN)
-    SCUNetStep(),          # 8 · Embellissement SCUNet
-    RembgStep(),           # 9 · Cast argentique (rembg)
+    ColorStep(),           # Correction couleur (manuelle)  — désactivée par défaut
+    FaceHighlightStep(),   # Correction hautes lumières     — activée par défaut
+    AutoColorStep(),       # Auto niveaux & couleurs        — activée par défaut
+    WhiteBalanceStep(),    # Balance des blancs (pipette)   — désactivée par défaut
+    InpaintStep(),         # Retouche inpainting (LaMa)     — désactivée par défaut
+    RedEyeStep(),          # Correction yeux rouges         — activée par défaut
+    GFPGANStep(),          # Restauration visages           — activée par défaut
+    SCUNetStep(),          # Embellissement SCUNet          — activée par défaut
+    LightLeakStep(),       # Lumière parasite               — désactivée par défaut
+    RembgStep(),           # Cast argentique                — désactivée par défaut
 ]
 
 __all__ = [

@@ -46,7 +46,7 @@ _LEFT_IRIS  = [474, 475, 476, 477]
 
 class RedEyeStep(StepBase):
     id                 = "redeye"
-    name               = "4 · Correction yeux rouges"
+    name               = "Correction yeux rouges"
     short_name         = "YeuxRouges"
     slow               = True
     enabled_by_default = True

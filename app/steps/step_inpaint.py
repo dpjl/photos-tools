@@ -19,7 +19,7 @@ from steps.base import StepBase
 
 class InpaintStep(StepBase):
     id               = "inpaint"
-    name             = "4 · Retouche (inpainting)"
+    name             = "Retouche (inpainting)"
     short_name       = "Retouche"
     slow             = True
     enabled_by_default = False
