@@ -46,6 +46,9 @@ class MainApp(QMainWindow):
         # Overlay détections (step_redeye) — actif sans recalcul
         self._overlay_step: Optional[str] = None   # step_id dont l'overlay est actif
 
+        # Fenêtre batch (une seule instance à la fois)
+        self._batch_window = None
+
         # Ordre et paramètres courants
         self._step_order:   list[str]       = [s.id for s in ALL_STEPS]
         self._step_enabled: dict[str, bool] = {
@@ -174,6 +177,12 @@ class MainApp(QMainWindow):
         file_menu.addAction(save_act)
 
         file_menu.addSeparator()
+        self._batch_act = QAction("📂  Batch…", self)
+        self._batch_act.setShortcut(QKeySequence("Ctrl+B"))
+        self._batch_act.triggered.connect(self._on_batch_requested)
+        file_menu.addAction(self._batch_act)
+
+        file_menu.addSeparator()
         quit_act = QAction("Quitter", self)
         quit_act.setShortcut(QKeySequence("Ctrl+Q"))
         quit_act.triggered.connect(self.close)
@@ -239,6 +248,56 @@ class MainApp(QMainWindow):
             f"Image ouverte : {os.path.basename(path)}  "
             f"({img.shape[1]}×{img.shape[0]} px)"
         )
+
+    def _on_batch_requested(self) -> None:
+        """Ouvre la fenêtre batch avec un snapshot de la configuration courante."""
+        from core.batch import BatchSession, BatchImageConfig
+        from ui.batch_window import BatchWindow
+
+        # Si déjà ouverte, la ramener au premier plan
+        if self._batch_window is not None:
+            self._batch_window.raise_()
+            self._batch_window.activateWindow()
+            return
+
+        # Choisir le dossier source
+        start_dir = (
+            os.path.dirname(self._original_path)
+            if self._original_path
+            else ""
+        )
+        folder = QFileDialog.getExistingDirectory(
+            self, "Dossier d'images à traiter en batch", start_dir
+        )
+        if not folder:
+            return
+
+        # Snapshot de la config courante
+        defaults = BatchImageConfig(
+            file_path       = "",
+            step_order      = list(self._ctrl.step_list.get_order()),
+            step_enabled    = dict(self._ctrl.step_list.get_enabled()),
+            step_params     = {
+                k: dict(v)
+                for k, v in self._ctrl.step_list.get_all_params().items()
+            },
+        )
+
+        session = BatchSession()
+        session.load_folder(folder, defaults)
+
+        if not session.images:
+            self._status_bar.showMessage("Aucune image trouvée dans ce dossier.")
+            return
+
+        self._batch_window = BatchWindow(self, session)
+        self._batch_window.closed.connect(self._on_batch_closed)
+        self._ctrl.set_running(True)   # désactive le bouton Lancer principal
+        self._batch_window.show()
+
+    def _on_batch_closed(self) -> None:
+        self._batch_window = None
+        self._ctrl.set_running(False)
 
     def _save_result(self):
         """Enregistre l'image affichée dans la vue A (Ctrl+S)."""

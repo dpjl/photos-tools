@@ -82,6 +82,28 @@ class MaskCanvas(QWidget):
     def get_mask(self) -> np.ndarray:
         return self._mask.copy()
 
+    def reset_image(
+        self,
+        image_bgr:    np.ndarray,
+        initial_mask: np.ndarray | None = None,
+    ) -> None:
+        """Charge une nouvelle image (mode batch — changement de photo)."""
+        self._orig_img_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        ih, iw = self._orig_img_rgb.shape[:2]
+        self._img_w, self._img_h = iw, ih
+        self._base_pixmap = self._make_rgb_pixmap(self._orig_img_rgb)
+        if initial_mask is not None and initial_mask.shape[:2] == (ih, iw):
+            self._mask = initial_mask.copy()
+        else:
+            self._mask = np.zeros((ih, iw), dtype=np.uint8)
+        self._dirty           = True
+        self._composite_cache = None
+        self._undo_stack.clear()
+        self._painting        = False
+        self._erasing         = False
+        self._last_canvas_pt  = None
+        self.update()
+
     def set_display_image(self, bgr: np.ndarray) -> None:
         """Change l'image affichee (ex. version auto-niveaux). Le masque n'est pas affecte."""
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
@@ -279,61 +301,69 @@ class MaskCanvas(QWidget):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Dialogue editeur
+# Panel embarquable (canvas + contrôles)
 # ══════════════════════════════════════════════════════════════════════════════
 
-class MaskEditorDialog(QDialog):
-    """Dialogue complet d'edition du masque de retouche."""
+class MaskCanvasPanel(QWidget):
+    """Canvas + panneau de contrôles, utilisable en ligne ou dans un dialogue.
+
+    En mode inline (batch) ::
+
+        panel = MaskCanvasPanel(image_bgr)
+        # intégrer dans un layout...
+        panel.set_image(new_bgr, saved_mask)   # changement d'image
+        mask = panel.get_mask()
+
+    En mode dialogue : utiliser MaskEditorDialog.
+    """
+
+    accepted = pyqtSignal()   # émis par le bouton Valider (si show_ok_cancel=True)
+    rejected = pyqtSignal()   # émis par le bouton Annuler  (si show_ok_cancel=True)
 
     def __init__(
         self,
-        parent,
-        image_bgr:    np.ndarray,
-        initial_mask: np.ndarray | None = None,
+        image_bgr:      np.ndarray,
+        initial_mask:   np.ndarray | None = None,
+        parent=None,
+        show_ok_cancel: bool = False,
+        sidebar_width:  int  = 215,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Masque de retouche — peinture par pinceau")
-        self.setModal(True)
-        self.setMinimumSize(900, 600)
-        self.resize(1100, 750)
+        self._orig_img_bgr       = image_bgr.copy()
+        self._auto_levels_active = False
 
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
         # ── Canvas (gauche, expansif) ─────────────────────────────────────────
-        self._orig_img_bgr         = image_bgr.copy()
-        self._auto_levels_active   = False
         self._canvas = MaskCanvas(image_bgr, initial_mask)
         self._canvas.brush_size_changed.connect(self._on_canvas_brush_changed)
         root.addWidget(self._canvas, stretch=1)
 
         # ── Barre d'outils (droite, largeur fixe) ────────────────────────────
         sidebar = QWidget()
-        sidebar.setFixedWidth(215)
+        sidebar.setFixedWidth(sidebar_width)
         sidebar.setStyleSheet("background: #1a1a2e;")
         sl = QVBoxLayout(sidebar)
         sl.setContentsMargins(12, 14, 12, 14)
         sl.setSpacing(8)
 
-        # Titre
         title = QLabel("Masque de retouche")
         title.setStyleSheet("color:#ddd; font-size:13px; font-weight:700;")
         sl.addWidget(title)
         sl.addWidget(self._hline())
 
-        # Instructions
         tips = QLabel(
-            "Clic gauche  → peindre\n"
-            "Clic droit   → effacer\n"
-            "Molette      → taille pinceau\n"
-            "Ctrl+Z       → annuler"
+            "Clic gauche  \u2192 peindre\n"
+            "Clic droit   \u2192 effacer\n"
+            "Molette      \u2192 taille pinceau\n"
+            "Ctrl+Z       \u2192 annuler"
         )
         tips.setStyleSheet("color:#7a9ab0; font-size:10px; font-family:Consolas,monospace;")
         sl.addWidget(tips)
         sl.addWidget(self._hline())
 
-        # Taille du pinceau
         lbl_brush = QLabel("Taille du pinceau :")
         lbl_brush.setStyleSheet("color:#bbb; font-size:11px;")
         sl.addWidget(lbl_brush)
@@ -355,25 +385,23 @@ class MaskEditorDialog(QDialog):
 
         sl.addWidget(self._hline())
 
-        # Actions masque
-        btn_clear = QPushButton("🗑  Effacer tout le masque")
+        btn_clear = QPushButton("\U0001f5d1  Effacer tout le masque")
         btn_clear.clicked.connect(self._canvas.clear_mask)
         self._style(btn_clear)
         sl.addWidget(btn_clear)
 
-        btn_undo = QPushButton("↩  Annuler (Ctrl+Z)")
+        btn_undo = QPushButton("\u21a9  Annuler (Ctrl+Z)")
         btn_undo.clicked.connect(self._canvas.undo)
         self._style(btn_undo)
         sl.addWidget(btn_undo)
 
         sl.addWidget(self._hline())
 
-        # Auto-detection
-        lbl_auto = QLabel("Détection automatique :")
+        lbl_auto = QLabel("D\u00e9tection automatique :")
         lbl_auto.setStyleSheet("color:#bbb; font-size:11px;")
         sl.addWidget(lbl_auto)
 
-        lbl_sens = QLabel("Sensibilité :")
+        lbl_sens = QLabel("Sensibilit\u00e9 :")
         lbl_sens.setStyleSheet("color:#789; font-size:10px;")
         sl.addWidget(lbl_sens)
 
@@ -383,42 +411,63 @@ class MaskEditorDialog(QDialog):
         sl.addWidget(self._sens_slider)
 
         self._add_cb = QCheckBox("Ajouter au masque existant")
-        self._add_cb.setStyleSheet("QCheckBox { color:#999; font-size:10px; }"
-                                   "QCheckBox::indicator { width:13px; height:13px; }")
+        self._add_cb.setStyleSheet(
+            "QCheckBox { color:#999; font-size:10px; }"
+            "QCheckBox::indicator { width:13px; height:13px; }"
+        )
         self._add_cb.setChecked(False)
         sl.addWidget(self._add_cb)
 
-        btn_detect = QPushButton("⚡  Détecter artefacts")
+        btn_detect = QPushButton("\u26a1  D\u00e9tecter artefacts")
         btn_detect.clicked.connect(self._run_auto_detect)
         self._style(btn_detect, accent=True)
         sl.addWidget(btn_detect)
         sl.addWidget(self._hline())
 
-        # Apercu auto-niveaux
         self._auto_btn = QPushButton("\U0001f4d0  Auto niveaux (aper\u00e7u)")
         self._auto_btn.setCheckable(True)
         self._auto_btn.clicked.connect(self._toggle_auto_levels)
         self._style(self._auto_btn)
         sl.addWidget(self._auto_btn)
 
-        lbl_auto_note = QLabel("Aperçu seulement — le masque\nreste dans les coord. d'origine.")
+        lbl_auto_note = QLabel(
+            "Aper\u00e7u seulement \u2014 le masque\nreste dans les coord. d'origine."
+        )
         lbl_auto_note.setStyleSheet("color:#556; font-size:9px;")
         sl.addWidget(lbl_auto_note)
         sl.addStretch()
-        sl.addWidget(self._hline())
 
-        # Valider / Annuler
-        btn_ok = QPushButton("✓  Valider le masque")
-        btn_ok.clicked.connect(self.accept)
-        self._style(btn_ok, accent=True)
-        sl.addWidget(btn_ok)
+        if show_ok_cancel:
+            sl.addWidget(self._hline())
+            btn_ok = QPushButton("\u2713  Valider le masque")
+            btn_ok.clicked.connect(self.accepted.emit)
+            self._style(btn_ok, accent=True)
+            sl.addWidget(btn_ok)
 
-        btn_cancel = QPushButton("✗  Annuler")
-        btn_cancel.clicked.connect(self.reject)
-        self._style(btn_cancel)
-        sl.addWidget(btn_cancel)
+            btn_cancel = QPushButton("\u2717  Annuler")
+            btn_cancel.clicked.connect(self.rejected.emit)
+            self._style(btn_cancel)
+            sl.addWidget(btn_cancel)
 
         root.addWidget(sidebar)
+
+    # ── API publique ──────────────────────────────────────────────────────────
+
+    def get_mask(self) -> np.ndarray:
+        return self._canvas.get_mask()
+
+    def set_image(
+        self,
+        image_bgr:    np.ndarray,
+        initial_mask: np.ndarray | None = None,
+    ) -> None:
+        """Change l'image affichée (mode batch — changement de photo)."""
+        self._orig_img_bgr = image_bgr.copy()
+        if self._auto_levels_active:
+            self._auto_btn.setChecked(False)
+            self._auto_btn.setText("\U0001f4d0  Auto niveaux (aper\u00e7u)")
+            self._auto_levels_active = False
+        self._canvas.reset_image(image_bgr, initial_mask)
 
     # ── Helpers UI ────────────────────────────────────────────────────────────
 
@@ -460,9 +509,8 @@ class MaskEditorDialog(QDialog):
     def _run_auto_detect(self) -> None:
         from steps.step_inpaint import _detect_artifacts
         sensitivity = self._sens_slider.value()
-        # Toujours utiliser l'image originale (pas la version auto-niveaux) pour la detection
-        img_bgr   = cv2.cvtColor(self._canvas._orig_img_rgb, cv2.COLOR_RGB2BGR)
-        auto_mask = _detect_artifacts(img_bgr, sensitivity)
+        img_bgr     = cv2.cvtColor(self._canvas._orig_img_rgb, cv2.COLOR_RGB2BGR)
+        auto_mask   = _detect_artifacts(img_bgr, sensitivity)
         if self._add_cb.isChecked():
             auto_mask = np.maximum(self._canvas.get_mask(), auto_mask)
         self._canvas.set_mask(auto_mask)
@@ -479,7 +527,34 @@ class MaskEditorDialog(QDialog):
             self._auto_btn.setText("\U0001f4d0  Auto niveaux (aper\u00e7u)")
             self._auto_levels_active = False
 
-    # ── Resultat ──────────────────────────────────────────────────────────────
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Dialogue éditeur
+# ══════════════════════════════════════════════════════════════════════════════
+
+class MaskEditorDialog(QDialog):
+    """Dialogue d'édition du masque — wrapper fin autour de MaskCanvasPanel."""
+
+    def __init__(
+        self,
+        parent,
+        image_bgr:    np.ndarray,
+        initial_mask: np.ndarray | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Masque de retouche \u2014 peinture par pinceau")
+        self.setModal(True)
+        self.setMinimumSize(900, 600)
+        self.resize(1100, 750)
+
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        self._panel = MaskCanvasPanel(image_bgr, initial_mask, show_ok_cancel=True)
+        self._panel.accepted.connect(self.accept)
+        self._panel.rejected.connect(self.reject)
+        root.addWidget(self._panel)
 
     def get_mask(self) -> np.ndarray:
-        return self._canvas.get_mask()
+        return self._panel.get_mask()

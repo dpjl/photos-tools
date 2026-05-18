@@ -100,6 +100,21 @@ class WBPickerCanvas(QWidget):
     def get_orig_bgr(self) -> np.ndarray:
         return self._orig_bgr
 
+    def reset_image(
+        self,
+        image_bgr:    np.ndarray,
+        initial_pick: tuple[int, int] | None = None,
+    ) -> None:
+        """Réinitialise le canvas pour une nouvelle image (mode batch)."""
+        self._orig_bgr = image_bgr.copy()
+        ih, iw = image_bgr.shape[:2]
+        self._img_w, self._img_h = iw, ih
+        rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        self._disp_pixmap = self._make_rgb_pixmap(rgb)
+        self._pick_pt = initial_pick
+        self._cursor_canvas = None
+        self.update()
+
     # ── Conversions ──────────────────────────────────────────────────────────
 
     def _display_rect(self) -> QRect:
@@ -212,11 +227,335 @@ class WBPickerCanvas(QWidget):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Panel embarquable (canvas + contrôles)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class WBPickerPanel(QWidget):
+    """Canvas + panneau de contrôles de balance des blancs, embarquable.
+
+    En mode inline (batch) ::
+
+        panel = WBPickerPanel(image_bgr)
+        # intégrer dans un layout...
+        panel.set_image(new_bgr, saved_pick, saved_radius)
+        pt     = panel.get_pick_point()
+        radius = panel.get_patch_radius()
+
+    En mode dialogue : utiliser WBPickerDialog.
+    """
+
+    accepted = pyqtSignal()   # émis par le bouton Valider (si show_ok_cancel=True)
+    rejected = pyqtSignal()   # émis par le bouton Annuler  (si show_ok_cancel=True)
+
+    def __init__(
+        self,
+        image_bgr:      np.ndarray,
+        initial_pick:   tuple[int, int] | None = None,
+        parent=None,
+        show_ok_cancel: bool = False,
+        sidebar_width:  int  = 225,
+    ) -> None:
+        super().__init__(parent)
+        self._orig_bgr           = image_bgr.copy()
+        self._auto_levels_active = False
+
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # ── Canvas ────────────────────────────────────────────────────────────
+        self._canvas = WBPickerCanvas(image_bgr, initial_pick)
+        self._canvas.pick_changed.connect(self._on_pick_changed)
+        self._canvas.cursor_moved.connect(self._on_cursor_moved)
+        root.addWidget(self._canvas, stretch=1)
+
+        # ── Barre latérale ────────────────────────────────────────────────────
+        sidebar = QWidget()
+        sidebar.setFixedWidth(sidebar_width)
+        sidebar.setStyleSheet("background: #1a1a2e;")
+        sl = QVBoxLayout(sidebar)
+        sl.setContentsMargins(12, 14, 12, 14)
+        sl.setSpacing(8)
+
+        title = QLabel("Balance des blancs")
+        title.setStyleSheet("color:#ddd; font-size:13px; font-weight:700;")
+        sl.addWidget(title)
+        sl.addWidget(self._hline())
+
+        tips = QLabel(
+            "Cliquez sur une zone\n"
+            "neutre (blanc ou gris)\n"
+            "de l'image.\n\n"
+            "La correction sera calculée\n"
+            "depuis les couleurs actuelles\n"
+            "au moment du traitement."
+        )
+        tips.setStyleSheet("color:#7a9ab0; font-size:10px;")
+        tips.setWordWrap(True)
+        sl.addWidget(tips)
+        sl.addWidget(self._hline())
+
+        lbl_cur = QLabel("Sous le curseur :")
+        lbl_cur.setStyleSheet("color:#bbb; font-size:10px;")
+        sl.addWidget(lbl_cur)
+
+        cur_row = QHBoxLayout()
+        self._cursor_color_box = self._color_box()
+        cur_row.addWidget(self._cursor_color_box)
+        self._cursor_rgb_lbl = QLabel("—")
+        self._cursor_rgb_lbl.setStyleSheet(
+            "color:#9de; font-size:10px; font-family:Consolas,monospace;"
+        )
+        cur_row.addWidget(self._cursor_rgb_lbl, stretch=1)
+        sl.addLayout(cur_row)
+        sl.addWidget(self._hline())
+
+        lbl_pick = QLabel("Point sélectionné :")
+        lbl_pick.setStyleSheet("color:#bbb; font-size:11px; font-weight:600;")
+        sl.addWidget(lbl_pick)
+
+        pick_row = QHBoxLayout()
+        self._pick_color_box = self._color_box()
+        pick_row.addWidget(self._pick_color_box)
+        self._pick_info_lbl = QLabel("Aucun")
+        self._pick_info_lbl.setStyleSheet(
+            "color:#ccc; font-size:10px; font-family:Consolas,monospace;"
+        )
+        self._pick_info_lbl.setWordWrap(True)
+        pick_row.addWidget(self._pick_info_lbl, stretch=1)
+        sl.addLayout(pick_row)
+
+        self._muls_lbl = QLabel("")
+        self._muls_lbl.setStyleSheet(
+            "color:#9de; font-size:10px; font-family:Consolas,monospace;"
+        )
+        self._muls_lbl.setWordWrap(True)
+        sl.addWidget(self._muls_lbl)
+
+        self._warn_lbl = QLabel("")
+        self._warn_lbl.setStyleSheet("color:#f99; font-size:10px;")
+        self._warn_lbl.setWordWrap(True)
+        sl.addWidget(self._warn_lbl)
+        sl.addWidget(self._hline())
+
+        lbl_rad = QLabel("Rayon d'échantillonnage :")
+        lbl_rad.setStyleSheet("color:#bbb; font-size:11px;")
+        sl.addWidget(lbl_rad)
+
+        rad_row = QHBoxLayout()
+        self._rad_val_lbl = QLabel("5 px")
+        self._rad_val_lbl.setStyleSheet(
+            "color:#9de; font-size:12px; font-weight:700; min-width:42px;"
+        )
+        rad_row.addWidget(self._rad_val_lbl)
+        rad_row.addStretch()
+        sl.addLayout(rad_row)
+
+        self._rad_slider = QSlider(Qt.Orientation.Horizontal)
+        self._rad_slider.setRange(1, 30)
+        self._rad_slider.setValue(5)
+        self._rad_slider.valueChanged.connect(self._on_radius_changed)
+        sl.addWidget(self._rad_slider)
+
+        btn_clear_wb = QPushButton("✖  Effacer la sélection")
+        btn_clear_wb.clicked.connect(self._clear_pick)
+        self._style(btn_clear_wb)
+        sl.addWidget(btn_clear_wb)
+        sl.addWidget(self._hline())
+
+        self._auto_btn = QPushButton("📐  Auto niveaux (aperçu)")
+        self._auto_btn.setCheckable(True)
+        self._auto_btn.clicked.connect(self._toggle_auto_levels)
+        self._style(self._auto_btn)
+        sl.addWidget(self._auto_btn)
+
+        lbl_auto_info = QLabel(
+            "Aperçu seulement — les\ncoord. conservent leurs\nvaleurs d'origine."
+        )
+        lbl_auto_info.setStyleSheet("color:#556; font-size:9px;")
+        sl.addWidget(lbl_auto_info)
+        sl.addStretch()
+
+        if show_ok_cancel:
+            sl.addWidget(self._hline())
+            btn_ok = QPushButton("✓  Valider")
+            btn_ok.clicked.connect(self.accepted.emit)
+            self._style(btn_ok, accent=True)
+            sl.addWidget(btn_ok)
+
+            btn_cancel = QPushButton("✗  Annuler")
+            btn_cancel.clicked.connect(self.rejected.emit)
+            self._style(btn_cancel)
+            sl.addWidget(btn_cancel)
+
+        root.addWidget(sidebar)
+
+        if initial_pick is not None:
+            self._refresh_pick_info(initial_pick[0], initial_pick[1])
+
+    # ── API publique ──────────────────────────────────────────────────────────
+
+    def get_pick_point(self) -> tuple[int, int] | None:
+        return self._canvas.get_pick_point()
+
+    def get_patch_radius(self) -> int:
+        return self._rad_slider.value()
+
+    def set_image(
+        self,
+        image_bgr:    np.ndarray,
+        initial_pick: tuple[int, int] | None = None,
+        patch_radius: int = 5,
+    ) -> None:
+        """Change l'image affichée (mode batch — changement de photo)."""
+        self._orig_bgr = image_bgr.copy()
+        if self._auto_levels_active:
+            self._auto_btn.setChecked(False)
+            self._auto_btn.setText("📐  Auto niveaux (aperçu)")
+            self._auto_levels_active = False
+        self._canvas.reset_image(image_bgr, initial_pick)
+        self._rad_slider.setValue(patch_radius)
+        self._rad_val_lbl.setText(f"{patch_radius} px")
+        self._pick_color_box.setStyleSheet(
+            "background:#333; border-radius:3px; border:1px solid #444;"
+        )
+        if initial_pick is not None:
+            self._refresh_pick_info(initial_pick[0], initial_pick[1])
+        else:
+            self._pick_info_lbl.setText("Aucun")
+            self._muls_lbl.setText("")
+            self._warn_lbl.setText("")
+
+    # ── Helpers UI ────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _hline() -> QFrame:
+        f = QFrame()
+        f.setFixedHeight(1)
+        f.setStyleSheet("background:#252545; margin:2px 0;")
+        return f
+
+    @staticmethod
+    def _color_box() -> QLabel:
+        lbl = QLabel()
+        lbl.setFixedSize(20, 20)
+        lbl.setStyleSheet("background:#333; border-radius:3px; border:1px solid #444;")
+        return lbl
+
+    @staticmethod
+    def _style(btn: QPushButton, accent: bool = False) -> None:
+        if accent:
+            btn.setStyleSheet(
+                "QPushButton { background:#1e3a52; color:#b8e0f7; border-radius:4px;"
+                "  padding:6px 8px; font-size:11px; }"
+                "QPushButton:hover { background:#2a5577; }"
+                "QPushButton:checked { background:#2a5577; color:#fff; }"
+            )
+        else:
+            btn.setStyleSheet(
+                "QPushButton { background:#1e1e38; color:#9ab; border-radius:4px;"
+                "  padding:6px 8px; font-size:11px; }"
+                "QPushButton:hover { background:#2a2a50; color:#ccc; }"
+                "QPushButton:checked { background:#2a4a6a; color:#adf; }"
+            )
+
+    def _set_color_box(self, box: QLabel, r: float, g: float, b: float) -> None:
+        ri, gi, bi = int(np.clip(r, 0, 255)), int(np.clip(g, 0, 255)), int(np.clip(b, 0, 255))
+        box.setStyleSheet(
+            f"background: rgb({ri},{gi},{bi}); border-radius:3px; border:1px solid #555;"
+        )
+
+    # ── Slots ─────────────────────────────────────────────────────────────────
+
+    def _on_cursor_moved(self, ix: int, iy: int) -> None:
+        r_val = int(self._orig_bgr[iy, ix, 2])
+        g_val = int(self._orig_bgr[iy, ix, 1])
+        b_val = int(self._orig_bgr[iy, ix, 0])
+        self._cursor_rgb_lbl.setText(f"R:{r_val:3d}  G:{g_val:3d}  B:{b_val:3d}")
+        self._set_color_box(self._cursor_color_box, r_val, g_val, b_val)
+
+    def _on_pick_changed(self, ix: int, iy: int) -> None:
+        self._refresh_pick_info(ix, iy)
+
+    def _refresh_pick_info(self, ix: int, iy: int) -> None:
+        from steps.step_wb import sample_patch_info
+        radius = self._rad_slider.value()
+        info   = sample_patch_info(self._orig_bgr, ix, iy, radius)
+        r, g, b = info["rgb_means"]
+        mr, mg, mb = info["muls"]
+        self._set_color_box(self._pick_color_box, r, g, b)
+        self._pick_info_lbl.setText(
+            f"({ix}, {iy})\nR:{r:.0f}  G:{g:.0f}  B:{b:.0f}"
+        )
+        self._muls_lbl.setText(f"×{mr:.3f}  ×{mg:.3f}  ×{mb:.3f}")
+        if info["too_dark"]:
+            self._warn_lbl.setText("⚠ Zone trop sombre.\nChoisissez une zone plus claire.")
+        else:
+            self._warn_lbl.setText("")
+
+    def _on_radius_changed(self, val: int) -> None:
+        self._rad_val_lbl.setText(f"{val} px")
+        self._canvas.set_patch_radius(val)
+        pt = self._canvas.get_pick_point()
+        if pt is not None:
+            self._refresh_pick_info(*pt)
+
+    def _clear_pick(self) -> None:
+        self._canvas.clear_pick_point()
+        self._pick_color_box.setStyleSheet(
+            "background:#333; border-radius:3px; border:1px solid #444;"
+        )
+        self._pick_info_lbl.setText("Aucun")
+        self._muls_lbl.setText("")
+        self._warn_lbl.setText("")
+
+    def _toggle_auto_levels(self) -> None:
+        if self._auto_btn.isChecked():
+            from steps.step_autocolor import _auto_color
+            corrected = _auto_color(self._orig_bgr)
+            self._canvas.set_display_image(corrected)
+            self._auto_btn.setText("✓ Auto niveaux actif (aperçu)")
+            self._auto_levels_active = True
+        else:
+            self._canvas.set_display_image(self._orig_bgr)
+            self._auto_btn.setText("📐  Auto niveaux (aperçu)")
+            self._auto_levels_active = False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Dialogue
 # ══════════════════════════════════════════════════════════════════════════════
 
 class WBPickerDialog(QDialog):
-    """Dialogue de selection du point de reference pour la balance des blancs."""
+    """Dialogue de balance des blancs — wrapper fin autour de WBPickerPanel."""
+
+    def __init__(
+        self,
+        parent,
+        image_bgr:    np.ndarray,
+        initial_pick: tuple[int, int] | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Balance des blancs — sélection du point de référence")
+        self.setModal(True)
+        self.setMinimumSize(900, 600)
+        self.resize(1100, 750)
+
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        self._panel = WBPickerPanel(image_bgr, initial_pick, show_ok_cancel=True)
+        self._panel.accepted.connect(self.accept)
+        self._panel.rejected.connect(self.reject)
+        root.addWidget(self._panel)
+
+    def get_pick_point(self) -> tuple[int, int] | None:
+        return self._panel.get_pick_point()
+
+    def get_patch_radius(self) -> int:
+        return self._panel.get_patch_radius()
+
 
     def __init__(
         self,

@@ -398,6 +398,17 @@ class StepListWidget(QWidget):
     def get_enabled(self) -> dict[str, bool]:
         return {sid: self._panels[sid].is_enabled() for sid in self._order}
 
+    def set_order(self, order: list[str]) -> None:
+        """Réordonne les panneaux selon la liste donnée (mode batch — chargement par image)."""
+        new_order = [s for s in order if s in self._panels]
+        for sid in self._order:
+            if sid not in new_order:
+                new_order.append(sid)
+        if new_order == self._order:
+            return
+        self._order = new_order
+        self._rebuild_layout()
+
     def set_all_states(self, states: dict[str, str]):
         for sid, state in states.items():
             if sid in self._panels:
