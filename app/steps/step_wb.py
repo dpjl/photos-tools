@@ -139,6 +139,7 @@ class WhiteBalanceStep(StepBase):
     enabled_by_default = False
     has_overlay       = False
     has_color_picker  = True   # active le bouton « Sélectionner point blanc »
+    previewable       = True   # aperçu instantané à chaque changement de param
 
     param_defs = [
         {

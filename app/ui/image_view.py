@@ -16,7 +16,7 @@ import cv2
 import numpy as np
 from PyQt6.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsPixmapItem
 from PyQt6.QtCore import Qt, QPointF, QRectF, pyqtSignal
-from PyQt6.QtGui import QPixmap, QImage, QWheelEvent, QTransform, QMouseEvent
+from PyQt6.QtGui import QPixmap, QImage, QWheelEvent, QTransform, QMouseEvent, QPainter, QColor, QFont
 
 
 def ndarray_to_qpixmap(img: np.ndarray) -> QPixmap:
@@ -52,6 +52,42 @@ class SyncedImageView(QGraphicsView):
         self.setStyleSheet("background: #1a1a2e; border: none;")
 
         self._drag_start: Optional[QPointF] = None
+        self._preview_mode: bool = False
+
+    # ── Preview banner ───────────────────────────────────────────────────────
+
+    def set_preview_mode(self, enabled: bool) -> None:
+        """Active/désactive le bandeau 'APERÇU' superposé à l'image."""
+        if enabled != self._preview_mode:
+            self._preview_mode = enabled
+            self.viewport().update()
+
+    def drawForeground(self, painter: QPainter, rect):
+        super().drawForeground(painter, rect)
+        if not self._preview_mode:
+            return
+        vp = self.viewport().rect()
+        text = "APERÇU"
+        font = QFont("Segoe UI", 10, QFont.Weight.Bold)
+        painter.save()
+        painter.resetTransform()
+        painter.setFont(font)
+        fm = painter.fontMetrics()
+        tw = fm.horizontalAdvance(text)
+        th = fm.height()
+        margin = 6
+        pad    = 6
+        bw, bh = tw + pad * 2, th + pad
+        bx = vp.right()  - bw - margin
+        by = vp.bottom() - bh - margin
+        painter.setOpacity(0.82)
+        painter.setBrush(QColor("#f39c12"))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(bx, by, bw, bh, 4, 4)
+        painter.setOpacity(1.0)
+        painter.setPen(QColor("#141414"))
+        painter.drawText(bx + pad, by + th - 2, text)
+        painter.restore()
 
     # ── Image ────────────────────────────────────────────────────────────────
 

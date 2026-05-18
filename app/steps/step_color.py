@@ -14,6 +14,7 @@ class ColorStep(StepBase):
     short_name         = "Couleur"
     slow               = False
     enabled_by_default = False
+    previewable        = True    # aperçu instantané à chaque changement de param
 
     param_defs = [
         {"key": "low_pct",    "label": "Pct. bas histogramme",  "type": "float",

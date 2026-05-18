@@ -36,7 +36,7 @@ class StepBase:
     has_overlay:       bool      = False  # True → checkbox overlay sans recalcul
     has_mask_editor:   bool      = False  # True → bouton « Peindre le masque »
     has_color_picker:  bool      = False  # True → bouton « Sélectionner point blanc »
-    has_color_picker:  bool      = False  # True → bouton « Sélectionner point blanc »
+    previewable:       bool      = False  # True → aperçu temps réel à chaque changement de param
 
     def process(
         self,

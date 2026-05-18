@@ -33,6 +33,7 @@ class AutoColorStep(StepBase):
     short_name         = "AutoColor"
     slow               = False
     enabled_by_default = True    # activée par défaut
+    previewable        = True    # aperçu instantané à chaque changement de param
 
     param_defs = [
         {"key": "mode",       "label": "Mode",                     "type": "choice",

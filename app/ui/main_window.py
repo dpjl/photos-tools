@@ -49,6 +49,14 @@ class MainApp(QMainWindow):
         # Fenêtre batch (une seule instance à la fois)
         self._batch_window = None
 
+        # ── Preview instantané (étapes rapides) ──────────────────────────────
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(150)          # 150 ms de debounce
+        self._preview_timer.timeout.connect(self._run_preview)
+        self._preview_step_id: Optional[str]       = None
+        self._preview_active:  bool                = False
+
         # Ordre et paramètres courants
         self._step_order:   list[str]       = [s.id for s in ALL_STEPS]
         self._step_enabled: dict[str, bool] = {
@@ -222,6 +230,7 @@ class MainApp(QMainWindow):
                 return
         self._original      = img
         self._original_path = path
+        self._clear_preview()   # annuler tout aperçu lié à l'image précédente
         self._history.clear()
         self._last_step_images.clear()
         self._active_run_id = None
@@ -429,6 +438,7 @@ class MainApp(QMainWindow):
         self._worker.step_done.connect(self._on_step_done)
         self._worker.step_failed.connect(self._on_step_failed)
         self._worker.all_done.connect(self._on_all_done)
+        self._clear_preview()   # annuler tout aperçu en cours avant de lancer
         self._worker.start()
 
         self._ctrl.set_running(True)
@@ -725,6 +735,83 @@ class MainApp(QMainWindow):
 
     def _on_param_changed(self, step_id: str, key: str, value):
         self._mark_stale_from(step_id)
+        self._schedule_preview(step_id)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Preview instantané (étapes rapides)
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _schedule_preview(self, step_id: str) -> None:
+        """Déclenche un preview différé (debounce 150 ms) pour l'étape donnée."""
+        step = self._steps_by_id.get(step_id)
+        if step is None or not getattr(step, "previewable", False):
+            return
+        if self._worker is not None and self._worker.isRunning():
+            return   # pipeline en cours, pas de preview concurrent
+        self._preview_step_id = step_id
+        self._preview_timer.start()
+
+    def _run_preview(self) -> None:
+        """Calcule et affiche l'aperçu de l'étape courante."""
+        step_id = self._preview_step_id
+        if step_id is None:
+            return
+        step = self._steps_by_id.get(step_id)
+        if step is None:
+            return
+
+        # Image en entrée de cette étape (sortie de l'étape précédente ou originale)
+        input_img = self._get_preview_input(step_id)
+        if input_img is None:
+            return
+
+        # Paramètres courants depuis le panneau
+        panel = self._ctrl.step_list.get_panel(step_id)
+        params = panel.get_params() if panel else step.default_params()
+
+        try:
+            result, _ = step.process(input_img, params, {})
+        except Exception:
+            return
+
+        # Afficher dans la vue A avec le badge APERÇU
+        self._preview_active = True
+        self._view_a_widget.set_image(result, preserve_zoom=True)
+        self._view_a_widget.set_preview_mode(True)
+        self._view_a_lbl.setText(f"A — APERÇU · {step.short_name}")
+        self._view_a_lbl.setStyleSheet(
+            "background: #1a1a2e; color: #f39c12; font-size: 10px; font-weight: bold;"
+        )
+
+    def _clear_preview(self) -> None:
+        """Annule l'aperçu et restaure l'affichage normal de la vue A."""
+        if not self._preview_active:
+            return
+        self._preview_active = False
+        self._preview_timer.stop()
+        self._view_a_widget.set_preview_mode(False)
+        self._view_a_lbl.setStyleSheet(
+            "background: #1a1a2e; color: #777; font-size: 10px;"
+        )
+        # Restaurer l'image normale de la vue A
+        img = self._get_image(*self._view_a)
+        if img is not None:
+            self._view_a_widget.set_image(img, preserve_zoom=True)
+        self._view_a_lbl.setText(self._make_label_text("A", *self._view_a))
+
+    def _get_preview_input(self, step_id: str) -> Optional[np.ndarray]:
+        """Retourne l'image en entrée de step_id (sortie de l'étape précédente)."""
+        if step_id not in self._step_order:
+            return self._original
+        idx = self._step_order.index(step_id)
+        if idx == 0:
+            return self._original
+        # Chercher en arrière la dernière étape activée ayant un résultat
+        for i in range(idx - 1, -1, -1):
+            sid = self._step_order[i]
+            if sid in self._last_step_images and self._step_enabled.get(sid, True):
+                return self._last_step_images[sid]
+        return self._original
 
     def _on_enabled_changed(self, step_id: str, enabled: bool):
         self._step_enabled[step_id] = enabled
