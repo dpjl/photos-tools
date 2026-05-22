@@ -35,11 +35,21 @@ class AutoColorStep(StepBase):
     enabled_by_default = True    # activée par défaut
     previewable        = True    # aperçu instantané à chaque changement de param
 
+    # Mécanisme de profils (lu par StepPanel)
+    profile_param_key  = "profil"
+    param_presets      = {
+        "naturel":   {"wb_strength": 1.00, "clip_lo": 0.5, "clip_hi": 0.5, "saturation": 1.00, "gamma": 1.0, "warmth": 0},
+        "neutre":    {"wb_strength": 0.80, "clip_lo": 0.5, "clip_hi": 0.5, "saturation": 1.00, "gamma": 1.0, "warmth": 0},
+        "classique": {"wb_strength": 0.50, "clip_lo": 1.0, "clip_hi": 1.0, "saturation": 1.25, "gamma": 1.0, "warmth": 0},
+        "actuel":    {"wb_strength": 0.80, "clip_lo": 0.5, "clip_hi": 0.5, "saturation": 1.00, "gamma": 1.0, "warmth": 0},
+    }
+
     param_defs = [
-        {"key": "mode",       "label": "Mode",                     "type": "choice",
-         "default": "naturel", "choices": ["naturel", "neutre", "actuel"]},
-        {"key": "wb_strength", "label": "Force correction",        "type": "float",
-         "default": 0.8, "min": 0.0, "max": 1.0, "step": 0.05},
+        {"key": "profil",      "label": "Profil",           "type": "choice",
+         "default": "naturel",
+         "choices": ["naturel", "neutre", "classique", "actuel", "personnalisé"]},
+        {"key": "wb_strength", "label": "Force correction", "type": "float",
+         "default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05},
         {"key": "clip_lo",    "label": "Seuil noir (%)",           "type": "float",
          "default": 0.5, "min": 0.0, "max": 5.0, "step": 0.1},
         {"key": "clip_hi",    "label": "Seuil blanc (%)",          "type": "float",
@@ -53,16 +63,25 @@ class AutoColorStep(StepBase):
     ]
 
     def process(self, img: np.ndarray, params: dict, context: dict):
-        return _auto_color(
-            img,
-            mode       =str(  params.get("mode",        "naturel")),
-            wb_strength=float(params.get("wb_strength", 0.8)),
-            clip_lo    =float(params.get("clip_lo",     0.5)),
-            clip_hi    =float(params.get("clip_hi",     0.5)),
-            saturation =float(params.get("saturation",  1.0)),
-            gamma      =float(params.get("gamma",       1.0)),
-            warmth     =int(  params.get("warmth",      0)),
-        ), {}
+        profil = str(params.get("profil", "naturel"))
+        preset = self.param_presets.get(profil, {})
+        p = {**params, **preset} if profil != "personnalisé" else dict(params)
+
+        wb  = float(p.get("wb_strength", 1.0))
+        lo  = float(p.get("clip_lo",     0.5))
+        hi  = float(p.get("clip_hi",     0.5))
+        sat = float(p.get("saturation",  1.0))
+        gam = float(p.get("gamma",       1.0))
+        wrm = int(  p.get("warmth",      0))
+
+        result = _apply_correction(img, profil, wb, lo, hi, sat, gam, wrm)
+        extras: dict = {}
+        if profil in self.param_presets:
+            extras["effective_params"] = {
+                "wb_strength": wb, "clip_lo": lo, "clip_hi": hi,
+                "saturation": sat, "gamma": gam, "warmth": wrm,
+            }
+        return result, extras
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -164,17 +183,58 @@ def _correct_neutre(img, wb_strength: float, clip_lo: float, clip_hi: float):
     return stretched.astype(np.uint8)
 
 
-def _auto_color(img, mode: str = "naturel", wb_strength: float = 0.8,
-                clip_lo: float = 0.5, clip_hi: float = 0.5,
-                saturation: float = 1.0, gamma: float = 1.0, warmth: int = 0):
-    """Applique la correction automatique complete selon le mode choisi."""
+def _correct_classique(img, wb_strength: float, clip_lo: float, clip_hi: float,
+                        clahe_clip: float = 0.5):
+    """Shades-of-Grey + étirement ROI + CLAHE local.
+
+    Correspond à l'algorithme fix_auto_roi_clahe identifié comme optimal
+    dans l'étude do-not-commit/bad-auto-niveaux.
+    """
+    out = img.copy()
+    # 1. Balance des blancs SoG (avant étirement)
+    if wb_strength > 0.0:
+        gains   = _shades_of_grey_gains(out)
+        partial = 1.0 + (gains - 1.0) * wb_strength
+        out = np.clip(out.astype(np.float32) * partial[np.newaxis, np.newaxis, :],
+                      0, 255).astype(np.uint8)
+    # 2. Étirement per-canal avec ROI inset
+    h, w = out.shape[:2]
+    rs, cs = _roi_slice(h, w)
+    roi = out[rs, cs]
+    img_f = out.astype(np.float32)
+    p_lo_pct, p_hi_pct = clip_lo, 100.0 - clip_hi
+    stretched = np.empty_like(img_f)
+    for i in range(3):
+        p_lo = float(np.percentile(roi[:, :, i], p_lo_pct))
+        p_hi = float(np.percentile(roi[:, :, i], p_hi_pct))
+        if p_hi > p_lo:
+            stretched[:, :, i] = (img_f[:, :, i] - p_lo) * 255.0 / (p_hi - p_lo)
+        else:
+            stretched[:, :, i] = img_f[:, :, i]
+    out = np.clip(stretched, 0, 255).astype(np.uint8)
+    # 3. CLAHE en espace LAB
+    if clahe_clip > 0.0:
+        lab = cv2.cvtColor(out, cv2.COLOR_BGR2LAB)
+        l_ch, a_ch, b_ch = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=clahe_clip, tileGridSize=(8, 8))
+        l_ch = clahe.apply(l_ch)
+        out = cv2.cvtColor(cv2.merge([l_ch, a_ch, b_ch]), cv2.COLOR_LAB2BGR)
+    return out
+
+
+def _apply_correction(img, profil: str = "naturel", wb_strength: float = 1.0,
+                       clip_lo: float = 0.5, clip_hi: float = 0.5,
+                       saturation: float = 1.0, gamma: float = 1.0, warmth: int = 0):
+    """Applique la correction complète : algo principal + sat + gamma + chaleur."""
     out = img.copy()
 
-    # 1. Correction couleur selon mode
-    if mode == "naturel":
+    # 1. Correction couleur selon profil
+    if profil in ("naturel", "personnalisé"):
         out = _correct_naturel(out, wb_strength, clip_lo, clip_hi)
-    elif mode == "neutre":
+    elif profil == "neutre":
         out = _correct_neutre(out, wb_strength, clip_lo, clip_hi)
+    elif profil == "classique":
+        out = _correct_classique(out, wb_strength, clip_lo, clip_hi)
     else:   # "actuel" - comportement historique
         if wb_strength > 0.0:
             gains   = _shades_of_grey_gains(out)
@@ -197,7 +257,7 @@ def _auto_color(img, mode: str = "naturel", wb_strength: float = 0.8,
         lut = np.clip(lut, 0, 255).astype(np.uint8)
         out = cv2.LUT(out, lut)
 
-    # 4. Chaleur (decalage b* en espace LAB)
+    # 4. Chaleur (décalage b* en espace LAB)
     if warmth != 0:
         lab          = cv2.cvtColor(out, cv2.COLOR_BGR2LAB).astype(np.int16)
         lab[:, :, 2] = np.clip(lab[:, :, 2] + warmth, 0, 255)

@@ -770,9 +770,12 @@ class MainApp(QMainWindow):
         params = panel.get_params() if panel else step.default_params()
 
         try:
-            result, _ = step.process(input_img, params, {})
+            result, extras = step.process(input_img, params, {})
         except Exception:
             return
+
+        if "effective_params" in extras and panel is not None:
+            panel.set_params(extras["effective_params"])
 
         # Afficher dans la vue A avec le badge APERÇU
         self._preview_active = True

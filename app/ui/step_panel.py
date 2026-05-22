@@ -173,10 +173,7 @@ class StepPanel(QWidget):
 
         for pdef in self._step.param_defs:
             row = ParamRow(pdef)
-            row.value_changed.connect(
-                lambda key, val, sid=self._step.id:
-                    self.param_changed.emit(sid, key, val)
-            )
+            row.value_changed.connect(self._on_param_row_changed)
             self._param_rows[pdef["key"]] = row
             body_layout.addWidget(row)
 
@@ -310,6 +307,23 @@ class StepPanel(QWidget):
             self.param_changed.emit(self._step.id, first["key"], first["default"])
 
     # ── Interne ──────────────────────────────────────────────────────────────
+
+    def _on_param_row_changed(self, key: str, val) -> None:
+        """Gère le changement de param avec couplage profil ↔ curseurs."""
+        profile_key = getattr(self._step, "profile_param_key", "")
+        if profile_key:
+            if key == profile_key and val != "personnalisé":
+                # Profil sélectionné → appliquer le preset (set_value est silencieux)
+                for k, v in self._step.param_presets.get(val, {}).items():
+                    if k in self._param_rows:
+                        self._param_rows[k].set_value(v)
+            elif key != profile_key:
+                # Curseur modifié manuellement → basculer sur "personnalisé"
+                prof_row = self._param_rows.get(profile_key)
+                if prof_row and prof_row.value() != "personnalisé":
+                    prof_row.set_value("personnalisé")
+                    self.param_changed.emit(self._step.id, profile_key, "personnalisé")
+        self.param_changed.emit(self._step.id, key, val)
 
     def _toggle(self):
         self._expanded = not self._expanded
