@@ -128,6 +128,8 @@ class ParamRow(QWidget):
             return
         self._block = True
         real_val = int_val / self._scale
+        if self._type == "int":
+            real_val = int(real_val)
         self._spin.setValue(real_val)
         self._block = False
         self.value_changed.emit(self._key, real_val)

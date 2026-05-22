@@ -867,6 +867,9 @@ class MainApp(QMainWindow):
         panel = self._ctrl.step_list.get_panel(step_id)
         if panel:
             panel.set_state("disabled" if not enabled else "stale")
+        # Rafraîchir le preview si l'étape appartient au groupe rapide
+        if step_id in _FAST_PREVIEW_IDS:
+            self._schedule_preview(step_id)
 
     def _mark_stale_from(self, step_id: Optional[str]):
         """Marque comme obsolètes toutes les étapes à partir de step_id."""
