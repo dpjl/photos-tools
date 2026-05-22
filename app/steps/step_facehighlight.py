@@ -41,12 +41,17 @@ class FaceHighlightStep(StepBase):
     enabled_by_default = True
     has_overlay = True
 
+    # Mécanisme de profils (lu par StepPanel)
+    profile_param_key = "profil"
+    param_presets     = {}   # pas de presets fixes : valeurs calculées depuis l'image
+
     param_defs = [
         {
-            "key": "auto_detect",
-            "label": "Detection automatique",
-            "type": "bool",
-            "default": True,
+            "key": "profil",
+            "label": "Mode",
+            "type": "choice",
+            "default": "auto",
+            "choices": ["auto", "personnalisé"],
         },
         {
             "key": "highlights",
@@ -97,14 +102,14 @@ class FaceHighlightStep(StepBase):
 
     def process(self, img: np.ndarray, params: dict, context: dict) -> tuple[np.ndarray, dict]:
         d = self.default_params()
-        auto_detect  = bool(params.get("auto_detect",   d["auto_detect"]))
+        profil       = str(params.get("profil",         d["profil"]))
         highlights   = int(params.get("highlights",     d["highlights"]))
         hl_tonal     = int(params.get("hl_tonal_width", d["hl_tonal_width"]))
         shadows      = int(params.get("shadows",        d["shadows"]))
         sh_tonal     = int(params.get("sh_tonal_width", d["sh_tonal_width"]))
         radius       = int(params.get("radius",         d["radius"]))
 
-        if auto_detect:
+        if profil == "auto":
             highlights, hl_tonal = _auto_detect_params(img)
 
         if highlights == 0 and shadows == 0:
@@ -113,7 +118,7 @@ class FaceHighlightStep(StepBase):
         result = _shadows_highlights(img, highlights, hl_tonal, shadows, sh_tonal, radius)
         detections = _build_region_detections(img, hl_tonal)
         extras: dict = {"highlight_detections": detections}
-        if auto_detect:
+        if profil == "auto":
             # Permet à l'UI de mettre à jour les sliders avec les valeurs effectives
             extras["effective_params"] = {
                 "highlights":    highlights,
