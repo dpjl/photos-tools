@@ -46,10 +46,10 @@ class AutoColorStep(StepBase):
 
     param_defs = [
         {"key": "profil",      "label": "Profil",           "type": "choice",
-         "default": "naturel",
+         "default": "actuel",
          "choices": ["naturel", "neutre", "classique", "actuel", "personnalisé"]},
         {"key": "wb_strength", "label": "Force correction", "type": "float",
-         "default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05},
+         "default": 0.8, "min": 0.0, "max": 1.0, "step": 0.05},
         {"key": "clip_lo",    "label": "Seuil noir (%)",           "type": "float",
          "default": 0.5, "min": 0.0, "max": 5.0, "step": 0.1},
         {"key": "clip_hi",    "label": "Seuil blanc (%)",          "type": "float",

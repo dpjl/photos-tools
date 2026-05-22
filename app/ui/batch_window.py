@@ -27,7 +27,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QSplitter, QScrollArea, QTabWidget,
     QFileDialog, QStatusBar, QSizePolicy, QMessageBox,
 )
-from PyQt6.QtCore import Qt, pyqtSlot, pyqtSignal, QObject
+from PyQt6.QtCore import Qt, QTimer, pyqtSlot, pyqtSignal, QObject
 from PyQt6.QtGui import QCloseEvent
 
 from core.pipeline import PipelineWorker
@@ -37,6 +37,12 @@ from ui.step_panel import StepListWidget
 from ui.batch_thumbnail_strip import BatchThumbnailStrip
 from ui.mask_editor import MaskCanvasPanel
 from ui.wb_picker import WBPickerPanel
+from ui.profile_mosaic import ProfileMosaicWidget
+
+# Étapes dont les paramètres déclenchent un aperçu rapide
+_FAST_PREVIEW_IDS = frozenset({"color", "facehighlight", "autocolor", "wb"})
+# Profils autocolor présentés dans la mosaïque
+_AUTOCOLOR_PROFILES = ["naturel", "neutre", "classique", "actuel"]
 
 
 class BatchWindow(QMainWindow):
@@ -60,6 +66,13 @@ class BatchWindow(QMainWindow):
 
         # La fenêtre doit se souvenir de l'image originale (pour masque/WB)
         self._current_orig: Optional[np.ndarray] = None
+
+        # Aperçu rapide : timer debounce (mosaïque ou panneau unique selon onglet actif)
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(300)
+        self._preview_timer.timeout.connect(self._do_preview_update)
+        self._last_mosaic_images: dict[str, np.ndarray] = {}
 
         self._build_ui()
         self._apply_theme()
@@ -209,13 +222,21 @@ class BatchWindow(QMainWindow):
 
         # Créer les panneaux avec une image 1×1 — mis à jour dès la première navigation
         _dummy = np.zeros((1, 1, 3), dtype=np.uint8)
-        self._mask_panel = MaskCanvasPanel(_dummy, None, show_ok_cancel=False)
-        self._wb_panel   = WBPickerPanel(
+        self._mask_panel   = MaskCanvasPanel(_dummy, None, show_ok_cancel=False)
+        self._wb_panel     = WBPickerPanel(
             _dummy, None, show_ok_cancel=False, sidebar_width=210
         )
-        self._tabs.addTab(self._mask_panel, "Masque")
-        self._tabs.addTab(self._wb_panel,   "Blanc")
+        self._mosaic_panel = ProfileMosaicWidget()
+        self._mosaic_panel.profile_selected.connect(self._on_profile_selected)
+        self._tabs.addTab(self._mask_panel,   "Masque")
+        self._tabs.addTab(self._wb_panel,     "Blanc")
+        self._tabs.addTab(self._mosaic_panel, "Profils couleur")
+        self._tabs.currentChanged.connect(self._on_tab_changed)
         rl.addWidget(self._tabs)
+
+        # Connecter les changements du point WB et du rayon pour déclencher l'aperçu
+        self._wb_panel._canvas.pick_changed.connect(self._on_wb_pick_changed)
+        self._wb_panel._rad_slider.valueChanged.connect(self._on_wb_radius_changed)
         splitter.addWidget(right)
 
         splitter.setStretchFactor(0, 0)
@@ -263,6 +284,9 @@ class BatchWindow(QMainWindow):
         fname = os.path.basename(cfg.file_path)
         self._statusbar.showMessage(f"{fname}  —  prêt")
 
+        # Mettre à jour les panneaux (mosaïque ou aperçu rapide)
+        self._schedule_preview_update()
+
     def _save_current_state(self) -> None:
         """Sauvegarde l'état courant de l'UI dans _current_cfg."""
         cfg = self._current_cfg
@@ -296,12 +320,16 @@ class BatchWindow(QMainWindow):
         if self._current_cfg:
             self._current_cfg.step_params.setdefault(step_id, {})[key] = value
             self._mark_customized()
+        if step_id in _FAST_PREVIEW_IDS:
+            self._schedule_preview_update()
 
     @pyqtSlot(str, bool)
     def _on_enabled_changed(self, step_id: str, enabled: bool) -> None:
         if self._current_cfg:
             self._current_cfg.step_enabled[step_id] = enabled
             self._mark_customized()
+        if step_id in _FAST_PREVIEW_IDS:
+            self._schedule_preview_update()
 
     @pyqtSlot(str)
     def _on_mask_edit_requested(self, step_id: str) -> None:
@@ -312,6 +340,234 @@ class BatchWindow(QMainWindow):
     def _on_color_picker_requested(self, step_id: str) -> None:
         """Bascule sur l'onglet Blanc."""
         self._tabs.setCurrentIndex(1)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Aperçu rapide — mosaïque ou panneau unique (Masque / Blanc)
+    # ══════════════════════════════════════════════════════════════════════════
+
+    # ── Signaux WB ────────────────────────────────────────────────────────────
+
+    @pyqtSlot(int, int)
+    def _on_wb_pick_changed(self, x: int, y: int) -> None:
+        """Le point de balance des blancs vient d'être déplacé."""
+        if self._current_cfg is not None:
+            self._current_cfg.wb_pick = (x, y)
+            self._mark_customized()
+        self._schedule_preview_update()
+
+    @pyqtSlot(int)
+    def _on_wb_radius_changed(self, radius: int) -> None:
+        """Le rayon du patch WB vient de changer."""
+        if self._current_cfg is not None:
+            self._current_cfg.wb_patch_radius = radius
+            self._mark_customized()
+        self._schedule_preview_update()
+
+    # ── Timer debounce ────────────────────────────────────────────────────────
+
+    @pyqtSlot(int)
+    def _on_tab_changed(self, index: int) -> None:
+        """Déclenche l'aperçu au changement d'onglet."""
+        self._schedule_preview_update()
+
+    def _schedule_preview_update(self) -> None:
+        """Lance le timer debounce (300 ms) pour mettre à jour l'aperçu."""
+        if self._current_orig is None:
+            return
+        self._preview_timer.start()
+
+    def _do_preview_update(self) -> None:
+        """Appelé par le timer : calcule mosaïque ou aperçu rapide selon l'onglet."""
+        if self._tabs.currentWidget() is self._mosaic_panel:
+            self._compute_and_show_mosaic()
+        else:
+            self._compute_and_show_fast_preview()
+
+    # ── Aperçu rapide (tabs Masque / Blanc) ───────────────────────────────────
+
+    def _compute_and_show_fast_preview(self) -> None:
+        """Calcule le fast-pipeline pour le profil courant et met à jour les panneaux."""
+        if self._current_orig is None or self._current_cfg is None:
+            return
+        self._inject_instance_state(self._current_cfg)
+        img = self._compute_single_profile_preview()
+        if img is not None:
+            self._refresh_panels(img)
+
+    def _compute_single_profile_preview(self) -> Optional[np.ndarray]:
+        """Exécute les fast steps pour le profil courant (une seule passe)."""
+        cfg = self._current_cfg
+        if cfg is None or self._current_orig is None:
+            return None
+        out = self._current_orig.copy()
+        ctx: dict = {}
+        for sid in cfg.step_order:
+            if sid not in _FAST_PREVIEW_IDS:
+                continue
+            if not cfg.step_enabled.get(sid, True):
+                continue
+            step  = self._steps_by_id.get(sid)
+            panel = self._step_list.get_panel(sid)
+            if step is None or panel is None:
+                continue
+            try:
+                result, extras = step.process(out, panel.get_params(), ctx)
+                out = result
+                ctx.update(extras)
+            except Exception:
+                pass
+        return out
+
+    def _refresh_panels(self, img: np.ndarray) -> None:
+        """Met à jour les panneaux Masque et Blanc avec l'image fournie.
+
+        Le point WB courant est récupéré depuis le canvas (l'utilisateur
+        peut l'avoir bougé sans qu'on ait encore sauvegardé).
+        """
+        if self._current_cfg is None:
+            return
+        cfg = self._current_cfg
+        current_pick   = self._wb_panel.get_pick_point()
+        current_radius = self._wb_panel.get_patch_radius()
+        self._mask_panel.set_image(img, cfg.inpaint_mask)
+        self._wb_panel.set_image(img, current_pick, current_radius)
+
+    # ── Mosaïque 4 profils ────────────────────────────────────────────────────
+
+    def _compute_and_show_mosaic(self) -> None:
+        """Calcule les 4 aperçus et les affiche dans le panneau mosaïque."""
+        if self._tabs.currentWidget() is not self._mosaic_panel:
+            return
+        if self._current_orig is None or self._current_cfg is None:
+            return
+
+        self._inject_instance_state(self._current_cfg)
+        self._mosaic_panel.set_computing(True)
+        images = self._compute_profile_images()
+        self._last_mosaic_images = images
+        self._mosaic_panel.set_images(images)
+        self._mosaic_panel.set_computing(False)
+
+        current_profile = self._get_current_autocolor_profile()
+        self._mosaic_panel.set_selected(current_profile)
+
+        # Synchroniser Masque+Blanc avec le profil sélectionné
+        if current_profile in images:
+            self._refresh_panels(images[current_profile])
+
+    def _compute_profile_images(self) -> dict[str, np.ndarray]:
+        """Calcule un aperçu rapide par profil AutoColor.
+
+        Optimisation : les étapes *avant* autocolor (color, facehighlight) ne
+        tournent qu'une seule fois ; autocolor + étapes post (wb) tournent 4 fois.
+        """
+        cfg = self._current_cfg
+        img = self._current_orig
+        if cfg is None or img is None:
+            return {}
+
+        # ── Séparer les étapes rapides actives en avant/après autocolor ────────
+        fast_before: list[str] = []
+        fast_after:  list[str] = []
+        seen_autocolor = False
+
+        for sid in cfg.step_order:
+            if sid not in _FAST_PREVIEW_IDS:
+                continue
+            if sid == "autocolor":
+                seen_autocolor = True
+                continue
+            if not seen_autocolor:
+                if cfg.step_enabled.get(sid, True):
+                    fast_before.append(sid)
+            else:
+                if cfg.step_enabled.get(sid, True):
+                    fast_after.append(sid)
+
+        # ── Pré-calcul commun (color + facehighlight) ─────────────────────────
+        intermediate = img.copy()
+        context: dict = {}
+        for sid in fast_before:
+            step  = self._steps_by_id.get(sid)
+            panel = self._step_list.get_panel(sid)
+            if step is None or panel is None:
+                continue
+            try:
+                result, extras = step.process(intermediate, panel.get_params(), context)
+                intermediate = result
+                context.update(extras)
+            except Exception:
+                pass
+
+        # ── 4 passes : autocolor forcé par profil + étapes post ───────────────
+        autocolor_step  = self._steps_by_id.get("autocolor")
+        autocolor_panel = self._step_list.get_panel("autocolor")
+
+        results: dict[str, np.ndarray] = {}
+        for profile in _AUTOCOLOR_PROFILES:
+            out = intermediate.copy()
+            ctx = dict(context)   # contexte isolé par profil
+
+            # AutoColor — forcé quel que soit l'état enabled
+            if autocolor_step is not None and autocolor_panel is not None:
+                base_params = autocolor_panel.get_params()
+                preset      = autocolor_step.param_presets.get(profile, {})
+                forced      = {**base_params, "profil": profile, **preset}
+                try:
+                    result, extras = autocolor_step.process(out, forced, ctx)
+                    out = result
+                    ctx.update(extras)
+                except Exception:
+                    pass
+
+            # Étapes post-autocolor (typiquement wb)
+            for sid in fast_after:
+                step  = self._steps_by_id.get(sid)
+                panel = self._step_list.get_panel(sid)
+                if step is None or panel is None:
+                    continue
+                try:
+                    result, extras = step.process(out, panel.get_params(), ctx)
+                    out = result
+                    ctx.update(extras)
+                except Exception:
+                    pass
+
+            results[profile] = out
+
+        return results
+
+    def _get_current_autocolor_profile(self) -> str:
+        """Retourne le profil autocolor sélectionné dans la configuration courante."""
+        if self._current_cfg is None:
+            return "actuel"
+        params = self._current_cfg.step_params.get("autocolor", {})
+        return str(params.get("profil", "actuel"))
+
+    @pyqtSlot(str)
+    def _on_profile_selected(self, profile: str) -> None:
+        """Appelé quand l'utilisateur clique sur une cellule de la mosaïque."""
+        ac_step  = self._steps_by_id.get("autocolor")
+        ac_panel = self._step_list.get_panel("autocolor")
+
+        preset = ac_step.param_presets.get(profile, {}) if ac_step else {}
+        full_params = {"profil": profile, **preset}
+
+        # Mettre à jour le panel visuellement (silencieux — pas de signal param_changed)
+        if ac_panel is not None:
+            ac_panel.set_params(full_params)
+
+        # Mettre à jour la configuration courante
+        if self._current_cfg is not None:
+            self._current_cfg.step_params.setdefault("autocolor", {}).update(full_params)
+            self._mark_customized()
+
+        # Mettre en évidence la cellule sélectionnée
+        self._mosaic_panel.set_selected(profile)
+
+        # Synchroniser les panneaux Masque+Blanc avec l'image du profil sélectionné
+        if profile in self._last_mosaic_images:
+            self._refresh_panels(self._last_mosaic_images[profile])
 
     # ══════════════════════════════════════════════════════════════════════════
     # Test (image courante seulement)
