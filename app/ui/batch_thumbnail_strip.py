@@ -1,10 +1,11 @@
 """ui/batch_thumbnail_strip.py — Bande de miniatures pour le mode batch.
 
-Affiche les images du dossier source avec indicateurs visuels :
-  - Bordure bleue  : image sélectionnée
-  - Point orange   : paramètres personnalisés
-  - Check vert     : image traitée et sauvegardée
-  - Spinner        : image en cours de traitement
+Indicateurs visuels :
+  - Bordure bleue        : image sélectionnée (navigation)
+  - Case bleue bas-gauche: incluse dans la sélection d'exécution
+  - Point orange         : paramètres personnalisés
+  - Check vert           : image traitée et sauvegardée
+  - Spinner              : image en cours de traitement
 """
 
 from __future__ import annotations
@@ -93,17 +94,19 @@ def _placeholder_pixmap() -> QPixmap:
 class BatchThumbCard(QWidget):
     """Carte miniature d'une image du batch."""
 
-    clicked       = pyqtSignal(str)   # file_path
+    # file_path + modificateurs clavier (Qt.KeyboardModifiers)
+    clicked       = pyqtSignal(str, object)
     reset_request = pyqtSignal(str)   # file_path — menu contextuel
 
     def __init__(self, file_path: str, parent=None) -> None:
         super().__init__(parent)
         self._file_path  = file_path
         self._pixmap:    Optional[QPixmap] = None
-        self._selected   = False
-        self._customized = False
-        self._done       = False
-        self._running    = False
+        self._selected    = False
+        self._run_selected = False    # dans la sélection d'exécution
+        self._customized  = False
+        self._done        = False
+        self._running     = False
 
         self.setFixedSize(_CARD_W, _CARD_H)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -146,6 +149,10 @@ class BatchThumbCard(QWidget):
         self._selected = v
         self._refresh_style()
 
+    def set_run_selected(self, v: bool) -> None:
+        self._run_selected = v
+        self.update()
+
     def set_customized(self, v: bool) -> None:
         self._customized = v
         self._refresh_style()
@@ -169,6 +176,16 @@ class BatchThumbCard(QWidget):
         super().paintEvent(_event)
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # Indicateur en cours de sélection d'exécution (case bleue bas-gauche)
+        if self._run_selected and not self._running:
+            p.setBrush(QBrush(QColor(58, 123, 213)))    # #3a7bd5
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawRoundedRect(2, _CARD_H - 14, 12, 12, 2, 2)
+            p.setPen(QPen(QColor(255, 255, 255), 1.8))
+            # Petit check blanc
+            p.drawLine(4, _CARD_H - 8, 7, _CARD_H - 5)
+            p.drawLine(7, _CARD_H - 5, 12, _CARD_H - 11)
 
         # Indicateur personnalisé (point orange en haut à droite)
         if self._customized and not self._done:
@@ -218,7 +235,7 @@ class BatchThumbCard(QWidget):
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
-            self.clicked.emit(self._file_path)
+            self.clicked.emit(self._file_path, event.modifiers())
 
     def _show_context_menu(self, pos) -> None:
         menu = QMenu(self)
@@ -271,6 +288,7 @@ class BatchThumbnailStrip(QWidget):
 
         self._cards: dict[str, BatchThumbCard] = {}   # file_path → card
         self._selected_path: Optional[str] = None
+        self._run_paths: set[str] = set()              # sélection pour exécution
 
         self._loader: Optional[_ThumbLoader] = None
         self._loader_thread: Optional[QThread] = None
@@ -282,6 +300,7 @@ class BatchThumbnailStrip(QWidget):
         self._stop_loader()
         self._cards.clear()
         self._selected_path = None
+        self._run_paths.clear()
 
         # Nettoyer le layout
         while self._row.count() > 1:
@@ -304,13 +323,33 @@ class BatchThumbnailStrip(QWidget):
             self._loader_thread = self._loader.start_in_thread()
 
     def select(self, file_path: str) -> None:
-        """Sélectionne visuellement la carte correspondante."""
+        """Sélectionne visuellement la carte correspondante (navigation)."""
         if self._selected_path and self._selected_path in self._cards:
             self._cards[self._selected_path].set_selected(False)
         self._selected_path = file_path
         if file_path in self._cards:
             self._cards[file_path].set_selected(True)
             self._scroll_to(file_path)
+
+    def get_run_selection(self) -> list[str]:
+        """Retourne les chemins sélectionnés pour exécution (ordre des cartes)."""
+        return [p for p in self._cards if p in self._run_paths]
+
+    def set_run_selected(self, file_path: str, v: bool) -> None:
+        """Active/désactive le badge de sélection d'exécution d'une carte."""
+        if v:
+            self._run_paths.add(file_path)
+        else:
+            self._run_paths.discard(file_path)
+        if file_path in self._cards:
+            self._cards[file_path].set_run_selected(v)
+
+    def clear_run_selection(self) -> None:
+        """Vide la sélection d'exécution."""
+        for path in list(self._run_paths):
+            if path in self._cards:
+                self._cards[path].set_run_selected(False)
+        self._run_paths.clear()
 
     def set_customized(self, file_path: str, v: bool) -> None:
         if file_path in self._cards:
@@ -342,9 +381,51 @@ class BatchThumbnailStrip(QWidget):
 
     # ── Slots ─────────────────────────────────────────────────────────────────
 
-    def _on_card_clicked(self, file_path: str) -> None:
-        self.select(file_path)
-        self.image_selected.emit(file_path)
+    def _on_card_clicked(self, file_path: str, modifiers: object) -> None:
+        # Qt.KeyboardModifiers est un QFlags — utiliser & directement, pas int()
+        ctrl  = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+        shift = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+
+        if ctrl:
+            # Ctrl+clic : basculer l'appartenance à la sélection d'exécution
+            if file_path in self._run_paths:
+                self._run_paths.discard(file_path)
+                if file_path in self._cards:
+                    self._cards[file_path].set_run_selected(False)
+            else:
+                self._run_paths.add(file_path)
+                if file_path in self._cards:
+                    self._cards[file_path].set_run_selected(True)
+
+        elif shift and self._selected_path:
+            # Shift+clic : sélectionner la plage entre image courante et celle-ci
+            paths = list(self._cards.keys())
+            try:
+                i1 = paths.index(self._selected_path)
+                i2 = paths.index(file_path)
+            except ValueError:
+                i1, i2 = 0, 0
+            start, end = min(i1, i2), max(i1, i2)
+            # Vider d'abord la sélection précédente
+            for p in list(self._run_paths):
+                if p in self._cards:
+                    self._cards[p].set_run_selected(False)
+            self._run_paths.clear()
+            for p in paths[start : end + 1]:
+                self._run_paths.add(p)
+                if p in self._cards:
+                    self._cards[p].set_run_selected(True)
+
+        else:
+            # Clic simple : naviguer + sélectionner seule pour exécution
+            for p in list(self._run_paths):
+                if p in self._cards:
+                    self._cards[p].set_run_selected(False)
+            self._run_paths = {file_path}
+            if file_path in self._cards:
+                self._cards[file_path].set_run_selected(True)
+            self.select(file_path)
+            self.image_selected.emit(file_path)
 
     def _on_thumb_ready(self, file_path: str, pix: QPixmap) -> None:
         if file_path in self._cards:

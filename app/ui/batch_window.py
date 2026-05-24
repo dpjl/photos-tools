@@ -2,7 +2,7 @@
 
 Layout ::
 
-    ┌── Toolbar: [Sortie: /...][Parcourir][▶ Tester][⚡ Lancer le batch] ──────┐
+    ┌── Toolbar: [Sortie: /...][Parcourir][\u25b6 Lancer la sélection][↓ Appliquer à toutes][⚡ Lancer le batch] ───────┐
     ├────────── BatchThumbnailStrip ──────────────────────────────────────────────┤
     │ StepListWidget  │       ImageView (SyncedImageView)     │  QTabWidget      │
     │ (≈260 px)       │                                       │  [Masque][Blanc] │
@@ -31,7 +31,7 @@ from PyQt6.QtCore import Qt, QTimer, pyqtSlot, pyqtSignal, QObject
 from PyQt6.QtGui import QCloseEvent
 
 from core.pipeline import PipelineWorker
-from core.batch import BatchSession, BatchImageConfig, build_step_log
+from core.batch import BatchSession, BatchImageConfig, build_step_log, save_recipe
 from steps import ALL_STEPS
 from ui.step_panel import StepListWidget
 from ui.batch_thumbnail_strip import BatchThumbnailStrip
@@ -60,9 +60,6 @@ class BatchWindow(QMainWindow):
         self._steps_by_id = {s.id: s for s in ALL_STEPS}
         self._current_cfg: Optional[BatchImageConfig] = None
         self._worker:      Optional[PipelineWorker]   = None
-
-        # Étapes auxquelles les résultats intermédiaires appartiennent (Tester)
-        self._test_step_results: dict[str, np.ndarray] = {}
 
         # La fenêtre doit se souvenir de l'image originale (pour masque/WB)
         self._current_orig: Optional[np.ndarray] = None
@@ -140,11 +137,21 @@ class BatchWindow(QMainWindow):
 
         lay.addStretch()
 
-        self._test_btn = QPushButton("▶  Tester")
-        self._style_btn(self._test_btn, accent=True)
-        self._test_btn.setToolTip("Traiter l'image courante sans sauvegarder")
-        self._test_btn.clicked.connect(self._run_test)
-        lay.addWidget(self._test_btn)
+        self._selection_btn = QPushButton("▶  Lancer la sélection")
+        self._style_btn(self._selection_btn, accent=True)
+        self._selection_btn.setToolTip(
+            "Traiter et sauvegarder les images sélectionnées (Ctrl+clic / Shift+clic)"
+        )
+        self._selection_btn.clicked.connect(self._run_on_selection)
+        lay.addWidget(self._selection_btn)
+
+        self._apply_btn = QPushButton("↓  Appliquer à toutes")
+        self._style_btn(self._apply_btn)
+        self._apply_btn.setToolTip(
+            "Propager les paramètres de l’image courante vers les images non personnalisées"
+        )
+        self._apply_btn.clicked.connect(self._apply_to_all_uncustomized)
+        lay.addWidget(self._apply_btn)
 
         self._batch_btn = QPushButton("⚡  Lancer le batch")
         self._style_btn(self._batch_btn, accent=True)
@@ -298,6 +305,7 @@ class BatchWindow(QMainWindow):
         cfg.inpaint_mask    = self._mask_panel.get_mask()
         cfg.wb_pick         = self._wb_panel.get_pick_point()
         cfg.wb_patch_radius = self._wb_panel.get_patch_radius()
+        save_recipe(cfg)
 
     def _config_for(self, file_path: str) -> Optional[BatchImageConfig]:
         for cfg in self._session.images:
@@ -570,22 +578,68 @@ class BatchWindow(QMainWindow):
             self._refresh_panels(self._last_mosaic_images[profile])
 
     # ══════════════════════════════════════════════════════════════════════════
-    # Test (image courante seulement)
-    # ══════════════════════════════════════════════════════════════════════════
+    # Lancer la sélection
+    # ══════════════════════════════════════════════════════════════════════════════
 
-    def _run_test(self) -> None:
+    def _run_on_selection(self) -> None:
+        """Lance le batch uniquement sur la sélection d’exécution.
+
+        Si la sélection est vide, utilise l’image courante seule.
+        """
         if self._worker and self._worker.isRunning():
             return
-        if self._current_cfg is None:
-            return
+        if not self._session.output_dir:
+            self._choose_output_dir()
+            if not self._session.output_dir:
+                return
+
+        self._save_current_state()
+
+        run_paths = self._strip.get_run_selection()
+        if not run_paths:
+            # Fallback : image courante
+            if self._current_cfg is None:
+                return
+            run_paths = [self._current_cfg.file_path]
+
+        queue: list[BatchImageConfig] = [
+            cfg for cfg in self._session.images
+            if cfg.file_path in set(run_paths)
+        ]
+        # Respecter l’ordre de la bande
+        order_index = {p: i for i, p in enumerate(run_paths)}
+        queue.sort(key=lambda c: order_index.get(c.file_path, 0))
+
+        self._run_batch_from_queue(queue)
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    # Appliquer à toutes les images non personnalisées
+    # ══════════════════════════════════════════════════════════════════════════════
+
+    def _apply_to_all_uncustomized(self) -> None:
+        """Propage step_enabled, step_params et step_order de l’image courante
+        vers toutes les images qui n’ont pas été personnalisées."""
         self._save_current_state()
         cfg = self._current_cfg
-        img = cv2.imread(cfg.file_path, cv2.IMREAD_COLOR)
-        if img is None:
-            self._statusbar.showMessage("Impossible de lire l'image.")
+        if cfg is None:
             return
-        self._inject_instance_state(cfg)
-        self._start_worker(cfg, img, mode="test")
+
+        targets = [
+            c for c in self._session.images
+            if c is not cfg and not c.customized
+        ]
+        if not targets:
+            self._statusbar.showMessage("Aucune image non personnalisée à mettre à jour.")
+            return
+
+        for target in targets:
+            target.step_order   = list(cfg.step_order)
+            target.step_enabled = dict(cfg.step_enabled)
+            target.step_params  = {k: dict(v) for k, v in cfg.step_params.items()}
+
+        self._statusbar.showMessage(
+            f"Paramètres appliqués à {len(targets)} image(s) non personnalisée(s)."
+        )
 
     # ══════════════════════════════════════════════════════════════════════════
     # Batch (toutes les images)
@@ -601,10 +655,12 @@ class BatchWindow(QMainWindow):
             if not self._session.output_dir:
                 return
 
-        # Sauvegarder l'état de l'image courante avant de lancer
         self._save_current_state()
+        self._run_batch_from_queue(list(self._session.images))
 
-        self._batch_queue = list(self._session.images)
+    def _run_batch_from_queue(self, queue: list["BatchImageConfig"]) -> None:
+        """Démarre un traitement batch sur la liste fournie."""
+        self._batch_queue    = queue
         self._batch_step_log: dict[str, list[dict]] = {}
         self._set_buttons_running(True)
         self._process_next_batch()
@@ -628,7 +684,7 @@ class BatchWindow(QMainWindow):
             return
 
         self._inject_instance_state(cfg)
-        self._start_worker(cfg, img, mode="batch")
+        self._start_worker(cfg, img)
 
     def _batch_done(self) -> None:
         self._set_buttons_running(False)
@@ -643,7 +699,6 @@ class BatchWindow(QMainWindow):
         self,
         cfg:  BatchImageConfig,
         img:  np.ndarray,
-        mode: str,   # "test" | "batch"
     ) -> None:
         enabled_order = [
             sid for sid in cfg.step_order
@@ -665,7 +720,6 @@ class BatchWindow(QMainWindow):
             step_enabled= cfg.step_enabled,
         )
         self._worker_cfg  = cfg
-        self._worker_mode = mode
         self._worker_step_results: dict[str, str] = {}
 
         self._worker.step_started.connect(self._on_step_started)
@@ -701,8 +755,7 @@ class BatchWindow(QMainWindow):
 
     @pyqtSlot(object)
     def _on_all_done(self, entry) -> None:
-        cfg  = self._worker_cfg
-        mode = self._worker_mode
+        cfg = self._worker_cfg
 
         cfg.result_img = entry.step_results.get(
             entry.completed_steps[-1]
@@ -711,36 +764,27 @@ class BatchWindow(QMainWindow):
 
         if cfg.result_img is not None:
             self._strip.update_result_thumb(cfg.file_path, cfg.result_img)
-            # Afficher le résultat dans les panneaux d'édition
             self._refresh_panels_with_result(cfg)
 
-        if mode == "batch":
-            cfg.batch_status = "done"
-            self._strip.set_running(cfg.file_path, False)
-            self._strip.set_done(cfg.file_path, True)
+        cfg.batch_status = "done"
+        self._strip.set_running(cfg.file_path, False)
+        self._strip.set_done(cfg.file_path, True)
 
-            # Sidecar JSON
-            step_log = build_step_log(
-                step_order   = cfg.step_order,
-                step_enabled = cfg.step_enabled,
-                step_params  = cfg.step_params,
-                step_results = self._worker_step_results,
-                context      = cfg.context,
-                steps_by_id  = self._steps_by_id,
-            )
-            try:
-                self._session.save_result(cfg, step_log)
-            except Exception as exc:
-                self._statusbar.showMessage(f"Erreur sauvegarde : {exc}")
+        # Sidecar résultat JSON
+        step_log = build_step_log(
+            step_order   = cfg.step_order,
+            step_enabled = cfg.step_enabled,
+            step_params  = cfg.step_params,
+            step_results = self._worker_step_results,
+            context      = cfg.context,
+            steps_by_id  = self._steps_by_id,
+        )
+        try:
+            self._session.save_result(cfg, step_log)
+        except Exception as exc:
+            self._statusbar.showMessage(f"Erreur sauvegarde : {exc}")
 
-            self._process_next_batch()
-        else:
-            # mode "test"
-            self._set_buttons_running(False)
-            fname = os.path.basename(cfg.file_path)
-            self._statusbar.showMessage(
-                f"Test terminé — {fname}  ({len(entry.completed_steps)} étape(s))"
-            )
+        self._process_next_batch()
 
     # ══════════════════════════════════════════════════════════════════════════
     # Injection de l'état des singletons d'étapes
@@ -808,8 +852,9 @@ class BatchWindow(QMainWindow):
             self._strip.set_customized(cfg.file_path, True)
 
     def _set_buttons_running(self, running: bool) -> None:
-        self._test_btn.setEnabled(not running)
+        self._selection_btn.setEnabled(not running)
         self._batch_btn.setEnabled(not running)
+        self._apply_btn.setEnabled(not running)
         self._stop_btn.setEnabled(running)
 
     def _on_strip_image_reset(self, file_path: str) -> None:

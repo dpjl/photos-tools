@@ -112,8 +112,16 @@ class BatchSession:
         entries = sorted(
             e for e in os.listdir(path)
             if os.path.splitext(e)[1].lower() in IMAGE_EXTENSIONS
+            and not e.endswith(".mask.png")
         )
-        self.images = [self.make_config(os.path.join(path, e)) for e in entries]
+        self.images = []
+        for e in entries:
+            full_path = os.path.join(path, e)
+            cfg = self.make_config(full_path)
+            recipe = load_recipe(full_path)
+            if recipe:
+                _apply_recipe(cfg, recipe)
+            self.images.append(cfg)
 
     def make_config(self, file_path: str) -> BatchImageConfig:
         """Crée une BatchImageConfig initialisée depuis les defaults."""
@@ -159,7 +167,7 @@ class BatchSession:
         fname     = config.filename
         stem, ext = os.path.splitext(fname)
         out_img   = os.path.join(self.output_dir, fname)
-        out_json  = os.path.join(self.output_dir, stem + ".json")
+        out_json  = os.path.join(self.output_dir, stem + ".result.json")
 
         # ── Image ─────────────────────────────────────────────────────────────
         if config.result_img is not None:
@@ -176,6 +184,94 @@ class BatchSession:
             json.dump(sidecar, f, ensure_ascii=False, indent=2)
 
         return out_img, out_json
+
+    def save_recipe(self, config: "BatchImageConfig") -> Optional[str]:
+        """Délègue à la fonction module-level save_recipe."""
+        return save_recipe(config)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Sidecar recette (fichier source)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def save_recipe(config: "BatchImageConfig") -> Optional[str]:
+    """Sauvegarde la configuration de restauration («recette») à côté du fichier source.
+
+    Crée ``{stem}.recipe.json`` et, si un masque inpaint est présent,
+    ``{stem}.mask.png`` dans le même dossier que l'image source.
+
+    Retourne le chemin du recipe, ou ``None`` si échec.
+    """
+    source_dir = os.path.dirname(config.file_path)
+    stem       = os.path.splitext(os.path.basename(config.file_path))[0]
+    recipe_path = os.path.join(source_dir, stem + ".recipe.json")
+
+    recipe: dict = {
+        "version":        1,
+        "customized":     config.customized,
+        "step_order":     config.step_order,
+        "step_enabled":   config.step_enabled,
+        "step_params":    config.step_params,
+        "wb_pick":        list(config.wb_pick) if config.wb_pick else None,
+        "wb_patch_radius": config.wb_patch_radius,
+        "has_mask":       config.inpaint_mask is not None,
+    }
+    try:
+        with open(recipe_path, "w", encoding="utf-8") as f:
+            json.dump(recipe, f, ensure_ascii=False, indent=2)
+
+        if config.inpaint_mask is not None:
+            mask_path = os.path.join(source_dir, stem + ".mask.png")
+            cv2.imwrite(mask_path, config.inpaint_mask)
+
+        return recipe_path
+    except Exception:
+        return None
+
+
+def load_recipe(file_path: str) -> Optional[dict]:
+    """Charge le fichier recipe à côté du fichier source.
+
+    Retourne le dictionnaire (avec éventuellement ``_mask`` injecté)
+    ou ``None`` si absent ou invalide.
+    """
+    source_dir  = os.path.dirname(file_path)
+    stem        = os.path.splitext(os.path.basename(file_path))[0]
+    recipe_path = os.path.join(source_dir, stem + ".recipe.json")
+
+    if not os.path.exists(recipe_path):
+        return None
+    try:
+        with open(recipe_path, "r", encoding="utf-8") as f:
+            data: dict = json.load(f)
+
+        if data.get("has_mask"):
+            mask_path = os.path.join(source_dir, stem + ".mask.png")
+            if os.path.exists(mask_path):
+                mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+                if mask is not None:
+                    data["_mask"] = mask
+
+        return data
+    except Exception:
+        return None
+
+
+def _apply_recipe(config: "BatchImageConfig", recipe: dict) -> None:
+    """Applique un recipe chargé à une BatchImageConfig."""
+    if "step_order" in recipe:
+        config.step_order = list(recipe["step_order"])
+    if "step_enabled" in recipe:
+        config.step_enabled = dict(recipe["step_enabled"])
+    if "step_params" in recipe:
+        config.step_params = {k: dict(v) for k, v in recipe["step_params"].items()}
+    if recipe.get("wb_pick") is not None:
+        config.wb_pick = tuple(recipe["wb_pick"])
+    if "wb_patch_radius" in recipe:
+        config.wb_patch_radius = int(recipe["wb_patch_radius"])
+    config.customized = bool(recipe.get("customized", False))
+    if "_mask" in recipe:
+        config.inpaint_mask = recipe["_mask"]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
