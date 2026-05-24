@@ -40,7 +40,8 @@ from ui.wb_picker import WBPickerPanel
 from ui.profile_mosaic import ProfileMosaicWidget
 
 # Étapes dont les paramètres déclenchent un aperçu rapide
-_FAST_PREVIEW_IDS = frozenset({"color", "facehighlight", "autocolor", "wb"})
+_FAST_PREVIEW_IDS = frozenset({"color", "facehighlight", "autocolor", "wb",
+                               "lightleak", "rembg"})
 # Profils autocolor présentés dans la mosaïque
 _AUTOCOLOR_PROFILES = ["naturel", "neutre", "classique", "actuel"]
 
