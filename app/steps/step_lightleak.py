@@ -93,15 +93,30 @@ class LightLeakStep(StepBase):
 # Fonctions internes
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _get_person_mask(img_bgr: np.ndarray, session) -> np.ndarray:
-    """Retourne un masque uint8 (255 = personne, 0 = fond) via U2-Net (rembg)."""
+def _get_person_mask(img_bgr: np.ndarray, session) -> tuple[np.ndarray, np.ndarray]:
+    """Retourne (soft_alpha_f32, excl_mask_u8).
+
+    soft_alpha  : canal alpha U2-Net normalisé 0.0–1.0, sans post-traitement.
+                  Utilisé pour le mélange final : bords naturellement doux,
+                  sans halo visible même sur des sujets fins (bras de bébé, etc.).
+    excl_mask   : masque binaire avec dilation minimale (5 px), utilisé
+                  uniquement pour exclure les personnes de la détection
+                  des zones contaminées / saines. La petite dilation garantit
+                  que les pixels de bord légèrement ambigués ne tombent pas
+                  dans la zone « saine ».
+    """
     from rembg import remove
     pil_in = Image.fromarray(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
     alpha  = np.array(remove(pil_in, session=session))[:, :, 3]
-    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (12, 12))
-    alpha = cv2.dilate(alpha, k)
-    _, mask = cv2.threshold(alpha, 127, 255, cv2.THRESH_BINARY)
-    return mask
+
+    # Alpha doux pour le mélange final — U2-Net produit déjà des bords antialiasis
+    soft_alpha = alpha.astype(np.float32) / 255.0
+
+    # Masque d’exclusion légèrement dilaté pour la détection des zones seulement
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    _, excl_mask = cv2.threshold(cv2.dilate(alpha, k), 127, 255, cv2.THRESH_BINARY)
+
+    return soft_alpha, excl_mask
 
 
 def _detect_zones(
@@ -200,10 +215,13 @@ def _correct_light_leak(
     session              = None,
 ) -> np.ndarray:
     """Pipeline complet de correction lumière parasite."""
-    person_mask = _get_person_mask(img_bgr, session) if session is not None else None
+    soft_alpha: np.ndarray | None = None
+    excl_mask:  np.ndarray | None = None
+    if session is not None:
+        soft_alpha, excl_mask = _get_person_mask(img_bgr, session)
 
     contaminated, clean = _detect_zones(
-        img_bgr, person_mask, hue_range, sat_min, dilation_px
+        img_bgr, excl_mask, hue_range, sat_min, dilation_px
     )
 
     # Pas de zone détectée → image inchangée
@@ -216,11 +234,12 @@ def _correct_light_leak(
         img_bgr, contaminated, clean, strength, feather_sigma
     )
 
-    # Restituer les personnes depuis l'original
-    if person_mask is not None:
-        mask_f = person_mask.astype(np.float32)[:, :, np.newaxis] / 255.0
-        result = (img_bgr.astype(np.float32) * mask_f +
-                  result.astype(np.float32) * (1.0 - mask_f))
+    # Restituer les personnes depuis l’original avec l’alpha doux U2-Net
+    # (bords anti-aliasés natifs — pas de halo visible)
+    if soft_alpha is not None:
+        alpha_f = soft_alpha[:, :, np.newaxis]
+        result = (img_bgr.astype(np.float32) * alpha_f +
+                  result.astype(np.float32) * (1.0 - alpha_f))
         result = np.clip(result, 0, 255).astype(np.uint8)
 
     return result
