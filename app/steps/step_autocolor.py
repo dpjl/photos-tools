@@ -38,16 +38,17 @@ class AutoColorStep(StepBase):
     # Mécanisme de profils (lu par StepPanel)
     profile_param_key  = "profil"
     param_presets      = {
-        "naturel":   {"wb_strength": 1.00, "clip_lo": 0.5, "clip_hi": 0.5, "saturation": 1.00, "gamma": 1.0, "warmth": 0},
-        "neutre":    {"wb_strength": 0.80, "clip_lo": 0.5, "clip_hi": 0.5, "saturation": 1.00, "gamma": 1.0, "warmth": 0},
-        "classique": {"wb_strength": 0.50, "clip_lo": 1.0, "clip_hi": 1.0, "saturation": 1.25, "gamma": 1.0, "warmth": 0},
-        "actuel":    {"wb_strength": 0.80, "clip_lo": 0.5, "clip_hi": 0.5, "saturation": 1.00, "gamma": 1.0, "warmth": 0},
+        "naturel":     {"wb_strength": 1.00, "clip_lo": 0.5, "clip_hi": 0.5, "saturation": 1.00, "gamma": 1.0, "warmth": 0, "red_desat": 0.0, "red_threshold": 0.5},
+        "neutre":      {"wb_strength": 0.80, "clip_lo": 0.5, "clip_hi": 0.5, "saturation": 1.00, "gamma": 1.0, "warmth": 0, "red_desat": 0.0, "red_threshold": 0.5},
+        "classique":   {"wb_strength": 0.50, "clip_lo": 1.0, "clip_hi": 1.0, "saturation": 1.25, "gamma": 1.0, "warmth": 0, "red_desat": 0.0, "red_threshold": 0.5},
+        "classique 2": {"wb_strength": 0.50, "clip_lo": 1.0, "clip_hi": 1.0, "saturation": 1.15, "gamma": 1.0, "warmth": 0, "red_desat": 0.40, "red_threshold": 0.45},
+        "actuel":      {"wb_strength": 0.80, "clip_lo": 0.5, "clip_hi": 0.5, "saturation": 1.00, "gamma": 1.0, "warmth": 0, "red_desat": 0.0, "red_threshold": 0.5},
     }
 
     param_defs = [
         {"key": "profil",      "label": "Profil",           "type": "choice",
          "default": "actuel",
-         "choices": ["naturel", "neutre", "classique", "actuel", "personnalisé"]},
+         "choices": ["naturel", "neutre", "classique", "classique 2", "actuel", "personnalisé"]},
         {"key": "wb_strength", "label": "Force correction", "type": "float",
          "default": 0.8, "min": 0.0, "max": 1.0, "step": 0.05},
         {"key": "clip_lo",    "label": "Seuil noir (%)",           "type": "float",
@@ -60,12 +61,16 @@ class AutoColorStep(StepBase):
          "default": 1.0, "min": 0.5, "max": 2.5, "step": 0.05},
         {"key": "warmth",     "label": "Chaleur (b* ±30)",         "type": "int",
          "default": 0, "min": -30, "max": 30, "step": 1},
+        {"key": "red_desat",     "label": "Atténuation rouges vifs",    "type": "float",
+         "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05},
+        {"key": "red_threshold", "label": "Seuil saturation rouge",     "type": "float",
+         "default": 0.5, "min": 0.1, "max": 0.9, "step": 0.05},
     ]
 
     def process(self, img: np.ndarray, params: dict, context: dict):
         profil = str(params.get("profil", "naturel"))
         preset = self.param_presets.get(profil, {})
-        p = {**params, **preset} if profil != "personnalisé" else dict(params)
+        p = {**preset, **params} if profil != "personnalisé" else dict(params)
 
         wb  = float(p.get("wb_strength", 1.0))
         lo  = float(p.get("clip_lo",     0.5))
@@ -73,8 +78,10 @@ class AutoColorStep(StepBase):
         sat = float(p.get("saturation",  1.0))
         gam = float(p.get("gamma",       1.0))
         wrm = int(  p.get("warmth",      0))
+        rds = float(p.get("red_desat",   0.0))
+        rdt = float(p.get("red_threshold", 0.5))
 
-        result = _apply_correction(img, profil, wb, lo, hi, sat, gam, wrm)
+        result = _apply_correction(img, profil, wb, lo, hi, sat, gam, wrm, rds, rdt)
         extras: dict = {}
         if profil in self.param_presets:
             extras["effective_params"] = {
@@ -224,8 +231,9 @@ def _correct_classique(img, wb_strength: float, clip_lo: float, clip_hi: float,
 
 def _apply_correction(img, profil: str = "naturel", wb_strength: float = 1.0,
                        clip_lo: float = 0.5, clip_hi: float = 0.5,
-                       saturation: float = 1.0, gamma: float = 1.0, warmth: int = 0):
-    """Applique la correction complète : algo principal + sat + gamma + chaleur."""
+                       saturation: float = 1.0, gamma: float = 1.0, warmth: int = 0,
+                       red_desat: float = 0.0, red_threshold: float = 0.5):
+    """Applique la correction complète : algo principal + sat + gamma + chaleur + désat rouge."""
     out = img.copy()
 
     # 1. Correction couleur selon profil
@@ -233,7 +241,7 @@ def _apply_correction(img, profil: str = "naturel", wb_strength: float = 1.0,
         out = _correct_naturel(out, wb_strength, clip_lo, clip_hi)
     elif profil == "neutre":
         out = _correct_neutre(out, wb_strength, clip_lo, clip_hi)
-    elif profil == "classique":
+    elif profil in ("classique", "classique 2"):
         out = _correct_classique(out, wb_strength, clip_lo, clip_hi)
     else:   # "actuel" - comportement historique
         if wb_strength > 0.0:
@@ -263,4 +271,40 @@ def _apply_correction(img, profil: str = "naturel", wb_strength: float = 1.0,
         lab[:, :, 2] = np.clip(lab[:, :, 2] + warmth, 0, 255)
         out          = cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
 
+    # 5. Désaturation sélective des rouges vifs (classique 2 ou si red_desat > 0)
+    if red_desat > 0.0:
+        out = _selective_red_desat(out, red_desat, red_threshold)
+
     return out
+
+
+def _selective_red_desat(
+    img_bgr:       np.ndarray,
+    red_desat:     float,
+    red_threshold: float,
+) -> np.ndarray:
+    """Réduit la saturation des pixels fortement saturés dans la gamme rouge/rosé.
+
+    Cible : H < 12° ou H > 168° (0–180 OpenCV) ET S > red_threshold.
+    Transition douce : la réduction est proportionnelle à l’excès de saturation
+    au-delà du seuil, jusqu’à red_desat × 100 % au maximum.
+    Autres teintes inchangées.
+    """
+    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
+    H   = hsv[:, :, 0]   # 0–180
+    S   = hsv[:, :, 1]   # 0–255
+
+    # Masque hue rouge / rosé / magenta (H≤12 OU H≥148 en OpenCV 0-180)
+    # Correspond à rouge pur (0-12°), rouge-magenta, rose, cramoisi (≥296° en degrés standard)
+    red_hue = (H <= 12) | (H >= 148)
+
+    # Seuil de saturation (en échelle 0–255)
+    sat_thresh = red_threshold * 255.0
+    denom      = max(255.0 - sat_thresh, 1.0)
+
+    # Facteur de réduction progressif : 0 au seuil, red_desat au maximum
+    excess    = np.clip((S - sat_thresh) / denom, 0.0, 1.0)
+    reduction = np.where(red_hue, excess * red_desat, 0.0)
+
+    hsv[:, :, 1] = np.clip(S * (1.0 - reduction), 0.0, 255.0)
+    return cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
