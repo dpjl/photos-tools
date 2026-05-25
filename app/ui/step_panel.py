@@ -105,6 +105,7 @@ class StepPanel(QWidget):
         self._state     = "idle"
         self._param_rows: dict[str, ParamRow] = {}
         self._expanded  = False
+        self._loading_preset = False   # True pendant le chargement silencieux d'un preset
 
         self.setObjectName("StepPanel")
         self._build_ui()
@@ -295,13 +296,39 @@ class StepPanel(QWidget):
             self._overlay_cb.setChecked(False)
             self._overlay_cb.blockSignals(False)
 
+    def is_loading_preset(self) -> bool:
+        """Vrai pendant le chargement automatique d'un preset de profil."""
+        return self._loading_preset
+
     def _reset_params(self):
-        """Rétablit toutes les valeurs par défaut et marque l'étape comme obsolète."""
+        """Rétablit les valeurs par défaut ou celles du profil actif."""
+        profile_key = getattr(self._step, "profile_param_key", "")
+        presets     = getattr(self._step, "param_presets", {})
+
+        if profile_key:
+            prof_row        = self._param_rows.get(profile_key)
+            current_profile = prof_row.value() if prof_row else "personnalisé"
+            if current_profile != "personnalisé" and current_profile in presets:
+                # Profil nommé actif → restaurer son preset (sans marquer customized)
+                self._loading_preset = True
+                for k, v in presets[current_profile].items():
+                    row = self._param_rows.get(k)
+                    if row is not None:
+                        row.set_value(v)
+                        self.param_changed.emit(self._step.id, k, v)
+                self._loading_preset = False
+                # Déclencher un rafraîchissement du pipeline
+                if self._step.param_defs:
+                    first     = self._step.param_defs[0]
+                    first_val = presets[current_profile].get(first["key"], first["default"])
+                    self.param_changed.emit(self._step.id, first["key"], first_val)
+                return
+
+        # Comportement par défaut : valeurs initiales de param_defs
         for pdef in self._step.param_defs:
             row = self._param_rows.get(pdef["key"])
             if row is not None:
                 row.set_value(pdef["default"])
-        # Marquer l'étape comme stale via un param_changed sur le premier paramètre
         if self._step.param_defs:
             first = self._step.param_defs[0]
             self.param_changed.emit(self._step.id, first["key"], first["default"])
@@ -311,18 +338,19 @@ class StepPanel(QWidget):
     def _on_param_row_changed(self, key: str, val) -> None:
         """Gère le changement de param avec couplage profil ↔ curseurs."""
         profile_key = getattr(self._step, "profile_param_key", "")
-        if profile_key:
-            if key == profile_key and val != "personnalisé":
-                # Profil sélectionné → appliquer le preset (set_value est silencieux)
-                for k, v in self._step.param_presets.get(val, {}).items():
-                    if k in self._param_rows:
-                        self._param_rows[k].set_value(v)
-            elif key != profile_key:
-                # Curseur modifié manuellement → basculer sur "personnalisé"
-                prof_row = self._param_rows.get(profile_key)
-                if prof_row and prof_row.value() != "personnalisé":
-                    prof_row.set_value("personnalisé")
-                    self.param_changed.emit(self._step.id, profile_key, "personnalisé")
+        if profile_key and key == profile_key and val != "personnalisé":
+            # Profil sélectionné → charger le preset dans les sliders ET dans step_params
+            self._loading_preset = True
+            for k, v in self._step.param_presets.get(val, {}).items():
+                if k in self._param_rows:
+                    self._param_rows[k].set_value(v)
+                    self.param_changed.emit(self._step.id, k, v)
+            # Émettre le changement de profil lui-même sous le flag
+            self.param_changed.emit(self._step.id, key, val)
+            self._loading_preset = False
+            return   # évite le double-émission en bas
+
+        # Clic sur un curseur : rester sur le profil actuel (ne pas basculer en personnalisé)
         self.param_changed.emit(self._step.id, key, val)
 
     def _toggle(self):

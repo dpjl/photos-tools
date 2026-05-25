@@ -328,7 +328,10 @@ class BatchWindow(QMainWindow):
     def _on_param_changed(self, step_id: str, key: str, value) -> None:
         if self._current_cfg:
             self._current_cfg.step_params.setdefault(step_id, {})[key] = value
-            self._mark_customized()
+            # Ne pas marquer customized lors du chargement automatique d'un preset de profil
+            panel = self._step_list.get_panel(step_id)
+            if panel is None or not panel.is_loading_preset():
+                self._mark_customized()
         if step_id in _FAST_PREVIEW_IDS:
             self._schedule_preview_update()
 
