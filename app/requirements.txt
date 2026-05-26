@@ -1,3 +1,20 @@
+# ============================================================
+# INSTALLATION (nouveau venv)
+# ============================================================
+# 1. Créer le venv et l'activer :
+#      python -m venv .venv
+#      .venv\Scripts\activate
+#
+# 2. Installer PyTorch CPU (index séparé, obligatoire avant le reste) :
+#      pip install torch==2.12.0 torchvision==0.27.0 --index-url https://download.pytorch.org/whl/cpu
+#
+# 3. Installer les dépendances :
+#      pip install -r requirements.txt
+#
+# 4. Appliquer les corrections de compatibilité (une seule fois) :
+#      python fix_packages.py
+# ============================================================
+
 PyQt6>=6.5.0
 opencv-python>=4.8.0
 numpy>=1.24.0
@@ -5,12 +22,16 @@ scipy>=1.10.0
 Pillow>=9.5.0
 tifffile>=2023.1.0
 
-# torch CPU — installer séparément avec:
-# .venv\Scripts\pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+# torch + torchvision : NE PAS installer depuis PyPI standard.
+# Utiliser la commande de l'étape 2 ci-dessus (index PyTorch CPU).
+# Version testée et fonctionnelle : torch==2.12.0, torchvision==0.27.0
+# ATTENTION : torch-directml n'est pas supporté (incompatible avec gfpgan/basicsr).
 
 # ML / IA
 gfpgan>=1.3.8
 basicsr>=1.4.2
+# REMARQUE basicsr : basicsr 1.4.2 importe torchvision.transforms.functional_tensor
+# (supprimé dans torchvision >= 0.16). Exécuter fix_packages.py après installation.
 facexlib>=0.3.0
 timm>=0.9.0
 thop>=0.1.0
@@ -20,7 +41,12 @@ safetensors>=0.4.0
 
 # MediaPipe (iris landmarks — correction yeux rouges)
 mediapipe>=0.10.0
+# CRITIQUE : mediapipe 0.10.x requiert protobuf < 4.
+# protobuf est épinglé ici pour éviter qu'onnxruntime ou onnx ne l'upgradent.
+protobuf==3.20.3
 
 # Segmentation arrière-plan
 rembg>=2.0.50
 onnxruntime>=1.15.0
+# REMARQUE onnxruntime : utiliser la version standard (CPU), PAS onnxruntime-directml.
+# onnxruntime-directml installe protobuf 7.x et casse mediapipe.

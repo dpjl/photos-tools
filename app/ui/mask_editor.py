@@ -77,6 +77,13 @@ class MaskCanvas(QWidget):
         # Historique undo
         self._undo_stack: list[np.ndarray] = []
 
+        # Zoom / pan
+        self._zoom:     float          = 1.0
+        self._pan_x:    float          = 0.0
+        self._pan_y:    float          = 0.0
+        self._panning:  bool           = False
+        self._pan_last: QPoint | None  = None
+
     # ── API publique ──────────────────────────────────────────────────────────
 
     def get_mask(self) -> np.ndarray:
@@ -102,6 +109,11 @@ class MaskCanvas(QWidget):
         self._painting        = False
         self._erasing         = False
         self._last_canvas_pt  = None
+        self._zoom            = 1.0
+        self._pan_x           = 0.0
+        self._pan_y           = 0.0
+        self._panning         = False
+        self._pan_last        = None
         self.update()
 
     def set_display_image(self, bgr: np.ndarray) -> None:
@@ -136,16 +148,33 @@ class MaskCanvas(QWidget):
     # ── Conversion de coordonnees ─────────────────────────────────────────────
 
     def _display_rect(self) -> QRect:
-        """Rect d'affichage de l'image (centree, ratio preserve)."""
+        """Rect d'affichage de l'image (centrée, ratio préservé, zoom/pan appliqués)."""
         cw, ch = self.width(), self.height()
         if cw == 0 or ch == 0:
             return QRect(0, 0, 0, 0)
-        scale = min(cw / self._img_w, ch / self._img_h)
-        dw    = int(self._img_w * scale)
-        dh    = int(self._img_h * scale)
-        ox    = (cw - dw) // 2
-        oy    = (ch - dh) // 2
-        return QRect(ox, oy, dw, dh)
+        fit_scale = min(cw / self._img_w, ch / self._img_h)
+        scale     = fit_scale * self._zoom
+        dw        = int(self._img_w * scale)
+        dh        = int(self._img_h * scale)
+        base_x    = (cw - dw) // 2
+        base_y    = (ch - dh) // 2
+        return QRect(base_x + int(self._pan_x), base_y + int(self._pan_y), dw, dh)
+
+    def _zoom_at(self, canvas_pt: QPoint, factor: float) -> None:
+        """Zoom centré sur canvas_pt (Ctrl+molette)."""
+        r = self._display_rect()
+        if r.width() == 0:
+            return
+        fx = (canvas_pt.x() - r.x()) / r.width()
+        fy = (canvas_pt.y() - r.y()) / r.height()
+        self._zoom = max(0.5, min(16.0, self._zoom * factor))
+        cw, ch     = self.width(), self.height()
+        fit_scale  = min(cw / self._img_w, ch / self._img_h) if cw and ch else 1.0
+        new_scale  = fit_scale * self._zoom
+        dw, dh     = int(self._img_w * new_scale), int(self._img_h * new_scale)
+        self._pan_x = canvas_pt.x() - fx * dw - (cw - dw) // 2
+        self._pan_y = canvas_pt.y() - fy * dh - (ch - dh) // 2
+        self.update()
 
     def _canvas_to_img(self, pt: QPoint) -> tuple[int, int] | None:
         """Convertit les coordonnees canvas en coordonnees image."""
@@ -198,6 +227,12 @@ class MaskCanvas(QWidget):
 
     def mousePressEvent(self, event):
         pos = event.position().toPoint()
+        if event.button() == Qt.MouseButton.MiddleButton:
+            self._panning  = True
+            self._pan_last = pos
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             self._push_undo()
             self._painting = True
@@ -217,6 +252,13 @@ class MaskCanvas(QWidget):
 
     def mouseMoveEvent(self, event):
         pos = event.position().toPoint()
+        if self._panning and self._pan_last is not None:
+            self._pan_x += pos.x() - self._pan_last.x()
+            self._pan_y += pos.y() - self._pan_last.y()
+            self._pan_last = pos
+            self.update()
+            event.accept()
+            return
         self._cursor_canvas = pos
         if (self._painting or self._erasing) and self._last_canvas_pt is not None:
             self._paint_segment(self._last_canvas_pt, pos, self._erasing)
@@ -225,6 +267,12 @@ class MaskCanvas(QWidget):
             self.update()  # reafficher juste le curseur
 
     def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.MiddleButton:
+            self._panning  = False
+            self._pan_last = None
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            event.accept()
+            return
         if event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
             self._painting       = False
             self._erasing        = False
@@ -232,13 +280,19 @@ class MaskCanvas(QWidget):
 
     def wheelEvent(self, event):
         delta = event.angleDelta().y()
-        step  = 10 if abs(delta) >= 120 else 3
-        if delta > 0:
-            self._brush_px = min(300, self._brush_px + step)
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            # Ctrl + molette = zoom
+            factor = 1.15 if delta > 0 else 1.0 / 1.15
+            self._zoom_at(event.position().toPoint(), factor)
         else:
-            self._brush_px = max(2, self._brush_px - step)
-        self.update()
-        self.brush_size_changed.emit(self._brush_px)
+            # Molette seule = taille du pinceau
+            step = 10 if abs(delta) >= 120 else 3
+            if delta > 0:
+                self._brush_px = min(300, self._brush_px + step)
+            else:
+                self._brush_px = max(2, self._brush_px - step)
+            self.update()
+            self.brush_size_changed.emit(self._brush_px)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Z and (

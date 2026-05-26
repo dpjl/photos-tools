@@ -74,6 +74,13 @@ class WBPickerCanvas(QWidget):
         # Curseur
         self._cursor_canvas: QPoint | None = None
 
+        # Zoom / pan
+        self._zoom:     float          = 1.0
+        self._pan_x:    float          = 0.0
+        self._pan_y:    float          = 0.0
+        self._panning:  bool           = False
+        self._pan_last: QPoint | None  = None
+
     # ── API publique ──────────────────────────────────────────────────────────
 
     def get_pick_point(self) -> tuple[int, int] | None:
@@ -113,6 +120,11 @@ class WBPickerCanvas(QWidget):
         self._disp_pixmap = self._make_rgb_pixmap(rgb)
         self._pick_pt = initial_pick
         self._cursor_canvas = None
+        self._zoom    = 1.0
+        self._pan_x   = 0.0
+        self._pan_y   = 0.0
+        self._panning = False
+        self._pan_last = None
         self.update()
 
     # ── Conversions ──────────────────────────────────────────────────────────
@@ -121,10 +133,29 @@ class WBPickerCanvas(QWidget):
         cw, ch = self.width(), self.height()
         if cw == 0 or ch == 0:
             return QRect(0, 0, 0, 0)
-        scale = min(cw / self._img_w, ch / self._img_h)
-        dw    = int(self._img_w * scale)
-        dh    = int(self._img_h * scale)
-        return QRect((cw - dw) // 2, (ch - dh) // 2, dw, dh)
+        fit_scale = min(cw / self._img_w, ch / self._img_h)
+        scale     = fit_scale * self._zoom
+        dw        = int(self._img_w * scale)
+        dh        = int(self._img_h * scale)
+        base_x    = (cw - dw) // 2
+        base_y    = (ch - dh) // 2
+        return QRect(base_x + int(self._pan_x), base_y + int(self._pan_y), dw, dh)
+
+    def _zoom_at(self, canvas_pt: QPoint, factor: float) -> None:
+        """Zoom centré sur canvas_pt (molette)."""
+        r = self._display_rect()
+        if r.width() == 0:
+            return
+        fx = (canvas_pt.x() - r.x()) / r.width()
+        fy = (canvas_pt.y() - r.y()) / r.height()
+        self._zoom = max(0.5, min(16.0, self._zoom * factor))
+        cw, ch     = self.width(), self.height()
+        fit_scale  = min(cw / self._img_w, ch / self._img_h) if cw and ch else 1.0
+        new_scale  = fit_scale * self._zoom
+        dw, dh     = int(self._img_w * new_scale), int(self._img_h * new_scale)
+        self._pan_x = canvas_pt.x() - fx * dw - (cw - dw) // 2
+        self._pan_y = canvas_pt.y() - fy * dh - (ch - dh) // 2
+        self.update()
 
     def _canvas_to_img(self, pt: QPoint) -> tuple[int, int] | None:
         r = self._display_rect()
@@ -151,6 +182,12 @@ class WBPickerCanvas(QWidget):
     # ── Evenements ───────────────────────────────────────────────────────────
 
     def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.MiddleButton:
+            self._panning  = True
+            self._pan_last = event.position().toPoint()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             coords = self._canvas_to_img(event.position().toPoint())
             if coords:
@@ -160,11 +197,31 @@ class WBPickerCanvas(QWidget):
 
     def mouseMoveEvent(self, event):
         pos = event.position().toPoint()
+        if self._panning and self._pan_last is not None:
+            self._pan_x   += pos.x() - self._pan_last.x()
+            self._pan_y   += pos.y() - self._pan_last.y()
+            self._pan_last = pos
+            self.update()
+            event.accept()
+            return
         self._cursor_canvas = pos
         coords = self._canvas_to_img(pos)
         if coords:
             self.cursor_moved.emit(*coords)
         self.update()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.MiddleButton:
+            self._panning  = False
+            self._pan_last = None
+            self.setCursor(Qt.CursorShape.CrossCursor)
+            event.accept()
+
+    def wheelEvent(self, event):
+        """Molette = zoom (centré sous le curseur)."""
+        delta  = event.angleDelta().y()
+        factor = 1.15 if delta > 0 else 1.0 / 1.15
+        self._zoom_at(event.position().toPoint(), factor)
 
     def leaveEvent(self, event):
         self._cursor_canvas = None

@@ -33,6 +33,7 @@ class SCUNetStep(StepBase):
     def __init__(self):
         self._model = None
         self._model_mode = None
+        self._device: "torch.device | None" = None
 
     def _load(self, mode: str):
         if self._model is not None and self._model_mode == mode:
@@ -49,9 +50,16 @@ class SCUNetStep(StepBase):
         # config=[4,4,4,4,4,4,4] correspond aux poids officiels scunet_color_real_*.pth
         # (config=[2,2,2,2,2,2,2] est le défaut de SCUNet() mais ne correspond pas aux poids)
         model = SCUNet(in_nc=3, config=[4, 4, 4, 4, 4, 4, 4], dim=64)
-        state_dict = torch.load(model_path, map_location="cpu")
+        # Charger les poids en CPU d'abord pour éviter tout problème de device
+        try:
+            state_dict = torch.load(model_path, map_location="cpu", weights_only=True)
+        except TypeError:
+            # Compatibilité avec anciennes versions torch sans argument weights_only
+            state_dict = torch.load(model_path, map_location="cpu")
         model.load_state_dict(state_dict, strict=True)
         model.eval()
+        self._device = _best_device()
+        model.to(self._device)
         self._model = model
         self._model_mode = mode
 
@@ -61,7 +69,7 @@ class SCUNetStep(StepBase):
         expand        = float(params.get("expand", 0.4))
         self._load(mode)
 
-        result = _run_scunet(self._model, img)
+        result = _run_scunet(self._model, img, self._device)
 
         # Protection des visages : recomposer depuis GFPGAN si activé
         if protect_faces:
@@ -73,20 +81,37 @@ class SCUNetStep(StepBase):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Sélection du device
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _best_device() -> "torch.device":
+    """Retourne le meilleur device disponible pour SCUNet : CUDA > CPU.
+
+    Note: DirectML (Intel/AMD iGPU via torch-directml) et OpenVINO GPU ne sont
+    PAS utilisés ici. L'architecture Swin Transformer de SCUNet génère des tenseurs
+    7D et des opérations ScatterND/Einsum que ces backends ne supportent pas
+    (crash 0xC0000005 sur DML, erreur bfuwzyx sur OpenVINO GPU).
+    """
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    return torch.device("cpu")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Fonctions de traitement internes
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _run_scunet(model, img: np.ndarray) -> np.ndarray:
+def _run_scunet(model, img: np.ndarray, device: "torch.device") -> np.ndarray:
     """Exécute SCUNet sur l'image (uint8 BGR) et retourne uint8 BGR.
 
     Le modèle attend du RGB ; on convertit en entrée et en sortie.
     """
     # BGR → RGB (le modèle a été entraîné sur des images RGB)
     img_rgb = img[:, :, ::-1].astype(np.float32) / 255.0
-    t = torch.from_numpy(img_rgb.transpose(2, 0, 1)).unsqueeze(0)  # 1×C×H×W
+    t = torch.from_numpy(img_rgb.transpose(2, 0, 1)).unsqueeze(0).to(device)  # 1×C×H×W
     with torch.no_grad():
         out = model(t)
-    out_rgb = out.squeeze(0).clamp(0, 1).numpy().transpose(1, 2, 0)
+    out_rgb = out.squeeze(0).cpu().clamp(0, 1).numpy().transpose(1, 2, 0)
     # RGB → BGR
     return (out_rgb[:, :, ::-1] * 255).round().astype(np.uint8)
 

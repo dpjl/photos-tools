@@ -37,13 +37,11 @@ from ui.step_panel import StepListWidget
 from ui.batch_thumbnail_strip import BatchThumbnailStrip
 from ui.mask_editor import MaskCanvasPanel
 from ui.wb_picker import WBPickerPanel
-from ui.profile_mosaic import ProfileMosaicWidget
+from ui.image_view import SyncedImageView
 
 # Étapes dont les paramètres déclenchent un aperçu rapide
 _FAST_PREVIEW_IDS = frozenset({"color", "facehighlight", "ddcolor_lut", "autocolor", "wb",
                                "lightleak", "rembg"})
-# Profils autocolor présentés dans la mosaïque
-_AUTOCOLOR_PROFILES = ["naturel", "neutre", "classique", "actuel"]
 
 
 class BatchWindow(QMainWindow):
@@ -65,12 +63,11 @@ class BatchWindow(QMainWindow):
         # La fenêtre doit se souvenir de l'image originale (pour masque/WB)
         self._current_orig: Optional[np.ndarray] = None
 
-        # Aperçu rapide : timer debounce (mosaïque ou panneau unique selon onglet actif)
+        # Aperçu rapide : timer debounce
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
         self._preview_timer.setInterval(300)
         self._preview_timer.timeout.connect(self._do_preview_update)
-        self._last_mosaic_images: dict[str, np.ndarray] = {}
 
         self._build_ui()
         self._apply_theme()
@@ -207,7 +204,7 @@ class BatchWindow(QMainWindow):
         scl.addWidget(scroll, stretch=1)
         splitter.addWidget(step_container)
 
-        # ── Panneau droit : onglets Masque / Blanc (prend tout l'espace restant) ─
+        # ── Panneau droit : onglets ────────────────────────────────────────────
         right = QWidget()
         right.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
@@ -230,15 +227,18 @@ class BatchWindow(QMainWindow):
 
         # Créer les panneaux avec une image 1×1 — mis à jour dès la première navigation
         _dummy = np.zeros((1, 1, 3), dtype=np.uint8)
-        self._mask_panel   = MaskCanvasPanel(_dummy, None, show_ok_cancel=False)
-        self._wb_panel     = WBPickerPanel(
+        self._mask_panel = MaskCanvasPanel(_dummy, None, show_ok_cancel=False)
+        self._wb_panel   = WBPickerPanel(
             _dummy, None, show_ok_cancel=False, sidebar_width=210
         )
-        self._mosaic_panel = ProfileMosaicWidget()
-        self._mosaic_panel.profile_selected.connect(self._on_profile_selected)
-        self._tabs.addTab(self._mask_panel,   "Masque")
-        self._tabs.addTab(self._wb_panel,     "Blanc")
-        self._tabs.addTab(self._mosaic_panel, "Profils couleur")
+        # Onglets d'aperçu image (zoom/pan via SyncedImageView)
+        self._origin_view = SyncedImageView()
+        self._dest_view   = SyncedImageView()
+
+        self._tabs.addTab(self._mask_panel,   "Masque")     # index 0
+        self._tabs.addTab(self._wb_panel,     "Blanc")      # index 1
+        self._tabs.addTab(self._origin_view,  "Originale")  # index 2
+        self._tabs.addTab(self._dest_view,    "Résultat")   # index 3
         self._tabs.currentChanged.connect(self._on_tab_changed)
         rl.addWidget(self._tabs)
 
@@ -285,9 +285,20 @@ class BatchWindow(QMainWindow):
 
         # ── Panneaux édition ───────────────────────────────────────────────
         if img is not None:
-            display = cfg.result_img if cfg.result_img is not None else img
+            # Charger l'image résultat depuis le disque si dispo (sans la stocker en mém.)
+            result = self._get_result_from_disk(cfg)
+            display = result if result is not None else img
             self._mask_panel.set_image(display, cfg.inpaint_mask)
             self._wb_panel.set_image(display, cfg.wb_pick, cfg.wb_patch_radius)
+
+        # ── Onglet Originale ──────────────────────────────────────────────────
+        self._origin_view.set_image(img)
+
+        # ── Onglet Résultat (chargement lazeux si onglet actif) ───────────────
+        if self._tabs.currentWidget() is self._dest_view:
+            self._update_dest_view(cfg)
+        else:
+            self._dest_view.set_image(None)
 
         fname = os.path.basename(cfg.file_path)
         self._statusbar.showMessage(f"{fname}  —  prêt")
@@ -379,7 +390,9 @@ class BatchWindow(QMainWindow):
 
     @pyqtSlot(int)
     def _on_tab_changed(self, index: int) -> None:
-        """Déclenche l'aperçu au changement d'onglet."""
+        """Au changement d'onglet : charge le résultat si nécessaire, lance l'aperçu."""
+        if self._tabs.currentWidget() is self._dest_view and self._current_cfg is not None:
+            self._update_dest_view(self._current_cfg)
         self._schedule_preview_update()
 
     def _schedule_preview_update(self) -> None:
@@ -389,10 +402,9 @@ class BatchWindow(QMainWindow):
         self._preview_timer.start()
 
     def _do_preview_update(self) -> None:
-        """Appelé par le timer : calcule mosaïque ou aperçu rapide selon l'onglet."""
-        if self._tabs.currentWidget() is self._mosaic_panel:
-            self._compute_and_show_mosaic()
-        else:
+        """Calcule le fast-pipeline si l'onglet actif est Masque ou Blanc."""
+        tab = self._tabs.currentWidget()
+        if tab in (self._mask_panel, self._wb_panel):
             self._compute_and_show_fast_preview()
 
     # ── Aperçu rapide (tabs Masque / Blanc) ───────────────────────────────────
@@ -444,142 +456,24 @@ class BatchWindow(QMainWindow):
         self._mask_panel.set_image(img, cfg.inpaint_mask)
         self._wb_panel.set_image(img, current_pick, current_radius)
 
-    # ── Mosaïque 4 profils ────────────────────────────────────────────────────
+    # ── Helpers image résultat ────────────────────────────────────────────────
 
-    def _compute_and_show_mosaic(self) -> None:
-        """Calcule les 4 aperçus et les affiche dans le panneau mosaïque."""
-        if self._tabs.currentWidget() is not self._mosaic_panel:
-            return
-        if self._current_orig is None or self._current_cfg is None:
-            return
+    def _get_result_from_disk(self, cfg: BatchImageConfig) -> Optional[np.ndarray]:
+        """Charge l'image résultat depuis le dossier de sortie si elle existe.
 
-        self._inject_instance_state(self._current_cfg)
-        self._mosaic_panel.set_computing(True)
-        images = self._compute_profile_images()
-        self._last_mosaic_images = images
-        self._mosaic_panel.set_images(images)
-        self._mosaic_panel.set_computing(False)
-
-        current_profile = self._get_current_autocolor_profile()
-        self._mosaic_panel.set_selected(current_profile)
-
-        # Synchroniser Masque+Blanc avec le profil sélectionné
-        if current_profile in images:
-            self._refresh_panels(images[current_profile])
-
-    def _compute_profile_images(self) -> dict[str, np.ndarray]:
-        """Calcule un aperçu rapide par profil AutoColor.
-
-        Optimisation : les étapes *avant* autocolor (color, facehighlight) ne
-        tournent qu'une seule fois ; autocolor + étapes post (wb) tournent 4 fois.
+        Ne stocke rien dans cfg : l'appelant gère la durée de vie du tableau.
         """
-        cfg = self._current_cfg
-        img = self._current_orig
-        if cfg is None or img is None:
-            return {}
+        if not self._session.output_dir:
+            return None
+        path = os.path.join(self._session.output_dir, os.path.basename(cfg.file_path))
+        if os.path.exists(path):
+            return cv2.imread(path, cv2.IMREAD_COLOR)
+        return None
 
-        # ── Séparer les étapes rapides actives en avant/après autocolor ────────
-        fast_before: list[str] = []
-        fast_after:  list[str] = []
-        seen_autocolor = False
-
-        for sid in cfg.step_order:
-            if sid not in _FAST_PREVIEW_IDS:
-                continue
-            if sid == "autocolor":
-                seen_autocolor = True
-                continue
-            if not seen_autocolor:
-                if cfg.step_enabled.get(sid, True):
-                    fast_before.append(sid)
-            else:
-                if cfg.step_enabled.get(sid, True):
-                    fast_after.append(sid)
-
-        # ── Pré-calcul commun (color + facehighlight) ─────────────────────────
-        intermediate = img.copy()
-        context: dict = {}
-        for sid in fast_before:
-            step  = self._steps_by_id.get(sid)
-            panel = self._step_list.get_panel(sid)
-            if step is None or panel is None:
-                continue
-            try:
-                result, extras = step.process(intermediate, panel.get_params(), context)
-                intermediate = result
-                context.update(extras)
-            except Exception:
-                pass
-
-        # ── 4 passes : autocolor forcé par profil + étapes post ───────────────
-        autocolor_step  = self._steps_by_id.get("autocolor")
-        autocolor_panel = self._step_list.get_panel("autocolor")
-
-        results: dict[str, np.ndarray] = {}
-        for profile in _AUTOCOLOR_PROFILES:
-            out = intermediate.copy()
-            ctx = dict(context)   # contexte isolé par profil
-
-            # AutoColor — forcé quel que soit l'état enabled
-            if autocolor_step is not None and autocolor_panel is not None:
-                base_params = autocolor_panel.get_params()
-                preset      = autocolor_step.param_presets.get(profile, {})
-                forced      = {**base_params, "profil": profile, **preset}
-                try:
-                    result, extras = autocolor_step.process(out, forced, ctx)
-                    out = result
-                    ctx.update(extras)
-                except Exception:
-                    pass
-
-            # Étapes post-autocolor (typiquement wb)
-            for sid in fast_after:
-                step  = self._steps_by_id.get(sid)
-                panel = self._step_list.get_panel(sid)
-                if step is None or panel is None:
-                    continue
-                try:
-                    result, extras = step.process(out, panel.get_params(), ctx)
-                    out = result
-                    ctx.update(extras)
-                except Exception:
-                    pass
-
-            results[profile] = out
-
-        return results
-
-    def _get_current_autocolor_profile(self) -> str:
-        """Retourne le profil autocolor sélectionné dans la configuration courante."""
-        if self._current_cfg is None:
-            return "actuel"
-        params = self._current_cfg.step_params.get("autocolor", {})
-        return str(params.get("profil", "actuel"))
-
-    @pyqtSlot(str)
-    def _on_profile_selected(self, profile: str) -> None:
-        """Appelé quand l'utilisateur clique sur une cellule de la mosaïque."""
-        ac_step  = self._steps_by_id.get("autocolor")
-        ac_panel = self._step_list.get_panel("autocolor")
-
-        preset = ac_step.param_presets.get(profile, {}) if ac_step else {}
-        full_params = {"profil": profile, **preset}
-
-        # Mettre à jour le panel visuellement (silencieux — pas de signal param_changed)
-        if ac_panel is not None:
-            ac_panel.set_params(full_params)
-
-        # Mettre à jour la configuration courante
-        if self._current_cfg is not None:
-            self._current_cfg.step_params.setdefault("autocolor", {}).update(full_params)
-            self._mark_customized()
-
-        # Mettre en évidence la cellule sélectionnée
-        self._mosaic_panel.set_selected(profile)
-
-        # Synchroniser les panneaux Masque+Blanc avec l'image du profil sélectionné
-        if profile in self._last_mosaic_images:
-            self._refresh_panels(self._last_mosaic_images[profile])
+    def _update_dest_view(self, cfg: BatchImageConfig) -> None:
+        """Met à jour l'onglet Résultat depuis le disque (chargement à la demande)."""
+        result = self._get_result_from_disk(cfg)
+        self._dest_view.set_image(result)
 
     # ══════════════════════════════════════════════════════════════════════════
     # Lancer la sélection
@@ -759,16 +653,22 @@ class BatchWindow(QMainWindow):
 
     @pyqtSlot(object)
     def _on_all_done(self, entry) -> None:
-        cfg = self._worker_cfg
-
-        cfg.result_img = entry.step_results.get(
-            entry.completed_steps[-1]
-        ) if entry.completed_steps else None
+        cfg        = self._worker_cfg
+        result_img = (entry.step_results.get(entry.completed_steps[-1])
+                      if entry.completed_steps else None)
         cfg.context = entry.context
 
-        if cfg.result_img is not None:
-            self._strip.update_result_thumb(cfg.file_path, cfg.result_img)
-            self._refresh_panels_with_result(cfg)
+        if result_img is not None:
+            # Miniature (petite copie, pas de problème mémoire)
+            self._strip.update_result_thumb(cfg.file_path, result_img)
+            # Mettre à jour les panneaux si c'est l'image courante
+            if cfg is self._current_cfg:
+                self._mask_panel.set_image(result_img, cfg.inpaint_mask)
+                self._wb_panel.set_image(result_img, cfg.wb_pick, cfg.wb_patch_radius)
+                if self._tabs.currentWidget() is self._dest_view:
+                    self._dest_view.set_image(result_img)
+            # Ne pas stocker result_img dans cfg — libère la mémoire immédiatement
+            # Le résultat sera relu depuis le disque si nécessaire.
 
         cfg.batch_status = "done"
         self._strip.set_running(cfg.file_path, False)
@@ -795,12 +695,11 @@ class BatchWindow(QMainWindow):
     # ══════════════════════════════════════════════════════════════════════════
 
     def _refresh_panels_with_result(self, cfg: BatchImageConfig) -> None:
-        """Met à jour les panneaux Masque et Blanc avec l'image résultat."""
-        result = cfg.result_img
-        if result is None:
-            return
-        self._mask_panel.set_image(result, cfg.inpaint_mask)
-        self._wb_panel.set_image(result, cfg.wb_pick, cfg.wb_patch_radius)
+        """[inutilisé — conservé pour compatibilité] Appelle set_image depuis le disque."""
+        result = self._get_result_from_disk(cfg)
+        if result is not None:
+            self._mask_panel.set_image(result, cfg.inpaint_mask)
+            self._wb_panel.set_image(result, cfg.wb_pick, cfg.wb_patch_radius)
 
     def _inject_instance_state(self, cfg: BatchImageConfig) -> None:
         """Injecte le masque et le point WB dans les singletons d'étapes."""
