@@ -141,3 +141,10 @@ app/gfpgan
 gfpgan/
 app/*.task
 _write_redeye.py
+
+# Modèles IA volumineux (à télécharger via download_models.py)
+*.pth
+*.onnx
+*.onnx.data
+GFPGANv1.4.pth
+models/ddcolor_modelscope/
