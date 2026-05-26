@@ -667,14 +667,13 @@ class BatchWindow(QMainWindow):
                 self._wb_panel.set_image(result_img, cfg.wb_pick, cfg.wb_patch_radius)
                 if self._tabs.currentWidget() is self._dest_view:
                     self._dest_view.set_image(result_img)
-            # Ne pas stocker result_img dans cfg — libère la mémoire immédiatement
-            # Le résultat sera relu depuis le disque si nécessaire.
+            # result_img n'est pas stocké dans cfg — libéré après écriture disque.
 
         cfg.batch_status = "done"
         self._strip.set_running(cfg.file_path, False)
         self._strip.set_done(cfg.file_path, True)
 
-        # Sidecar résultat JSON
+        # Sidecar résultat JSON + image
         step_log = build_step_log(
             step_order   = cfg.step_order,
             step_enabled = cfg.step_enabled,
@@ -684,7 +683,7 @@ class BatchWindow(QMainWindow):
             steps_by_id  = self._steps_by_id,
         )
         try:
-            self._session.save_result(cfg, step_log)
+            self._session.save_result(cfg, result_img, step_log)
         except Exception as exc:
             self._statusbar.showMessage(f"Erreur sauvegarde : {exc}")
 

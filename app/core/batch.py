@@ -88,6 +88,7 @@ class BatchSession:
         session.output_dir = "/path/to/output"
         session.save_result(config, result_img, step_log)
     """
+    # Note : save_result attend result_img en paramètre explicite.
 
     def __init__(self) -> None:
         self.source_dir:  str = ""
@@ -155,11 +156,14 @@ class BatchSession:
 
     def save_result(
         self,
-        config:   BatchImageConfig,
-        step_log: list[dict],
+        config:    BatchImageConfig,
+        result_img: Optional[np.ndarray],
+        step_log:  list[dict],
     ) -> tuple[str, str]:
         """Sauvegarde l'image résultat et le fichier sidecar JSON.
 
+        result_img est passé explicitement (non stocké dans config) afin de
+        libérer la mémoire dès que possible après l'écriture.
         Retourne (chemin_image, chemin_sidecar).
         """
         os.makedirs(self.output_dir, exist_ok=True)
@@ -170,8 +174,8 @@ class BatchSession:
         out_json  = os.path.join(self.output_dir, stem + ".result.json")
 
         # ── Image ─────────────────────────────────────────────────────────────
-        if config.result_img is not None:
-            _write_image(config.result_img, out_img)
+        if result_img is not None:
+            _write_image(result_img, out_img)
 
         # ── Sidecar JSON ──────────────────────────────────────────────────────
         sidecar = {
