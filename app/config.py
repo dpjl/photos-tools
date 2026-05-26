@@ -13,3 +13,7 @@ BASE_DIR = os.path.dirname(APP_DIR)
 GFPGAN_MODEL_PATH        = os.path.join(BASE_DIR, "GFPGANv1.4.pth")
 SCUNET_MODELS_DIR        = os.path.join(BASE_DIR, "models")
 MEDIAPIPE_LANDMARKER_PATH = os.path.join(APP_DIR,  "face_landmarker.task")
+
+# DDColor modelscope (couleur IA)
+DDCOLOR_MODEL_REPO = "piddnad/ddcolor_modelscope"
+DDCOLOR_CACHE_DIR  = os.path.join(SCUNET_MODELS_DIR, "ddcolor_modelscope")

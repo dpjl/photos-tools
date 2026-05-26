@@ -25,7 +25,7 @@ from ui.control_panel import ControlPanel
 
 
 # Étapes dont un changement de paramètre déclenche le mini-pipeline de preview rapide
-_FAST_PREVIEW_IDS = frozenset({"color", "facehighlight", "autocolor", "wb",
+_FAST_PREVIEW_IDS = frozenset({"color", "facehighlight", "ddcolor_lut", "autocolor", "wb",
                                "lightleak", "rembg"})
 
 

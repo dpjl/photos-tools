@@ -3,6 +3,7 @@
 from steps.step_color          import ColorStep
 from steps.step_wb             import WhiteBalanceStep
 from steps.step_autocolor      import AutoColorStep
+from steps.step_ddcolor_lut    import DDColorLUTStep
 from steps.step_facehighlight  import FaceHighlightStep
 from steps.step_inpaint        import InpaintStep
 from steps.step_redeye         import RedEyeStep
@@ -15,6 +16,7 @@ from steps.step_lightleak      import LightLeakStep
 ALL_STEPS = [
     ColorStep(),           # Correction couleur (manuelle)  — désactivée par défaut
     FaceHighlightStep(),   # Correction hautes lumières     — activée par défaut
+    DDColorLUTStep(),      # Couleur IA DDColor LUT         — désactivée par défaut
     AutoColorStep(),       # Auto niveaux & couleurs        — activée par défaut
     WhiteBalanceStep(),    # Balance des blancs (pipette)   — désactivée par défaut
     InpaintStep(),         # Retouche inpainting (LaMa)     — désactivée par défaut
@@ -27,6 +29,6 @@ ALL_STEPS = [
 
 __all__ = [
     "ALL_STEPS",
-    "ColorStep", "AutoColorStep", "FaceHighlightStep",
+    "ColorStep", "AutoColorStep", "DDColorLUTStep", "FaceHighlightStep",
     "LightLeakStep", "RedEyeStep", "GFPGANStep", "SCUNetStep", "RembgStep",
 ]

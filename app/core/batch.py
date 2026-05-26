@@ -262,9 +262,15 @@ def _apply_recipe(config: "BatchImageConfig", recipe: dict) -> None:
     if "step_order" in recipe:
         config.step_order = list(recipe["step_order"])
     if "step_enabled" in recipe:
-        config.step_enabled = dict(recipe["step_enabled"])
+        # Fusionner plutôt que remplacer : les steps absents du recipe (ajoutés
+        # après la sauvegarde) conservent leur valeur enabled_by_default issue
+        # de make_config.
+        config.step_enabled.update(recipe["step_enabled"])
     if "step_params" in recipe:
-        config.step_params = {k: dict(v) for k, v in recipe["step_params"].items()}
+        # Même logique : fusionner pour conserver les params par défaut des
+        # nouveaux steps.
+        for k, v in recipe["step_params"].items():
+            config.step_params[k] = dict(v)
     if recipe.get("wb_pick") is not None:
         config.wb_pick = tuple(recipe["wb_pick"])
     if "wb_patch_radius" in recipe:
