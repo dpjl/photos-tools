@@ -12,6 +12,7 @@ class PhotoGroup:
 
     key: str                          # e.g. '1995-0077'
     photos: Dict[int, Path] = field(default_factory=dict)  # dir_index → path
+    jsons: Dict[int, Path] = field(default_factory=dict)   # dir_index → associated JSON path
 
     # ------------------------------------------------------------------
     def get_photo(self, dir_index: int) -> Optional[Path]:

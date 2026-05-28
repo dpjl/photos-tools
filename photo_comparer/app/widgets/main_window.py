@@ -29,6 +29,8 @@ from typing import Optional
 from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QButtonGroup,
+    QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -77,6 +79,17 @@ _COPY_BTN_ON = (
 _COPY_BTN_OFF = (
     "QPushButton { background:#2a2a2a; color:#555; border:1px solid #3a3a3a;"
     " border-radius:3px; padding:3px 12px; }"
+)
+
+_MODE_BTN_ACTIVE = (
+    "QPushButton { background:#1a3a6a; color:#8ac4ff; border:1px solid #2a5a9a;"
+    " border-radius:3px; padding:3px 10px; font-weight:bold; }"
+    "QPushButton:hover { background:#234e8a; }"
+)
+_MODE_BTN_INACTIVE = (
+    "QPushButton { background:#363636; color:#888; border:1px solid #505050;"
+    " border-radius:3px; padding:3px 10px; }"
+    "QPushButton:hover { background:#464646; color:#bbb; }"
 )
 
 
@@ -139,6 +152,27 @@ class MainWindow(QMainWindow):
         tb.addWidget(dirs_btn)
         tb.addSeparator()
 
+        # Mode toggle: Images / JSON
+        self._mode_img_btn = QPushButton("Images")
+        self._mode_img_btn.setToolTip("Afficher les images (Ctrl+I)")
+        self._mode_img_btn.setStyleSheet(_MODE_BTN_ACTIVE)
+
+        self._mode_json_btn = QPushButton("{ } JSON")
+        self._mode_json_btn.setToolTip("Afficher les JSON associés (Ctrl+J)")
+        self._mode_json_btn.setStyleSheet(_MODE_BTN_INACTIVE)
+
+        self._mode_img_btn.clicked.connect(lambda: self._on_mode_changed("images"))
+        self._mode_json_btn.clicked.connect(lambda: self._on_mode_changed("json"))
+
+        mode_widget = QWidget()
+        mode_layout = QHBoxLayout(mode_widget)
+        mode_layout.setContentsMargins(0, 0, 0, 0)
+        mode_layout.setSpacing(2)
+        mode_layout.addWidget(self._mode_img_btn)
+        mode_layout.addWidget(self._mode_json_btn)
+        tb.addWidget(mode_widget)
+        tb.addSeparator()
+
         # Zoom controls
         def _add_btn(text, tip, slot, width=None):
             b = QPushButton(text)
@@ -184,6 +218,8 @@ class MainWindow(QMainWindow):
             s.activated.connect(slot)
 
         sc("Ctrl+D", self._open_dirs_dialog)
+        sc("Ctrl+I", lambda: self._on_mode_changed("images"))
+        sc("Ctrl+J", lambda: self._on_mode_changed("json"))
         sc("Ctrl+=", self._cmp.zoom_in)
         sc("Ctrl++", self._cmp.zoom_in)
         sc("Ctrl+-", self._cmp.zoom_out)
@@ -285,6 +321,17 @@ class MainWindow(QMainWindow):
             )
         else:
             self._status.clearMessage()
+
+    def _on_mode_changed(self, mode: str):
+        """Switch between image and JSON comparison modes."""
+        is_json = (mode == "json")
+        self._mode_img_btn.setStyleSheet(
+            _MODE_BTN_INACTIVE if is_json else _MODE_BTN_ACTIVE
+        )
+        self._mode_json_btn.setStyleSheet(
+            _MODE_BTN_ACTIVE if is_json else _MODE_BTN_INACTIVE
+        )
+        self._cmp.set_mode(mode)
 
     def _copy_best(self):
         if not self._best_path:

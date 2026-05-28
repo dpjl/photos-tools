@@ -44,6 +44,20 @@ class DirectoryManager:
                 # Keep first file found per dir per key (in case of duplicates)
                 if dir_idx not in self._group_map[key].photos:
                     self._group_map[key].photos[dir_idx] = fp
+
+        # Second pass: attach JSON files to existing image groups
+        for dir_idx, directory in enumerate(self.directories):
+            if not directory.is_dir():
+                continue
+            for fp in directory.iterdir():
+                if fp.suffix.lower() != ".json":
+                    continue
+                key = extract_prefix(fp.name)
+                if key not in self._group_map:
+                    continue  # no matching image group — skip
+                if dir_idx not in self._group_map[key].jsons:
+                    self._group_map[key].jsons[dir_idx] = fp
+
         self.groups = sorted(self._group_map.values())
 
     # ------------------------------------------------------------------

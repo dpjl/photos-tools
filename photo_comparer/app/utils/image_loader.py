@@ -14,6 +14,7 @@ even if connected after load() is called.
 """
 from pathlib import Path
 
+from PIL import Image as PILImage
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 from PySide6.QtGui import QImage
 
@@ -33,6 +34,21 @@ class _LoadTask(QRunnable):
 
     def run(self):
         image = QImage(str(self.path))
+        if image.isNull():
+            # Fallback: Pillow handles formats that Qt may lack on Linux (e.g. TIFF)
+            try:
+                with PILImage.open(self.path) as pil_img:
+                    pil_img = pil_img.convert("RGBA")
+                    data = pil_img.tobytes("raw", "RGBA")
+                    image = QImage(
+                        data,
+                        pil_img.width,
+                        pil_img.height,
+                        pil_img.width * 4,
+                        QImage.Format.Format_RGBA8888,
+                    ).copy()  # .copy() détache du buffer local `data`
+            except Exception:
+                pass
         if image.isNull():
             self.signals.error.emit(self.key, f"Cannot load {self.path.name}")
         else:

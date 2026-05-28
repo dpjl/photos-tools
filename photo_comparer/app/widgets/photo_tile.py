@@ -9,10 +9,11 @@ solo_requested(int)  — tile index; emitted on double-click → expand to solo
 best_selected(int)   — tile index; emitted on Ctrl+Click → mark as best
 """
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtGui import QColor, QFont, QTextBlockFormat, QTextCursor
 from PySide6.QtWidgets import (
     QFrame,
     QLabel,
+    QPlainTextEdit,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -34,6 +35,7 @@ class PhotoTile(QFrame):
         self.tile_index = tile_index
         self._is_best = False
         self._has_image = False
+        self._file_size = None   # cached file size in bytes
 
         self.setStyleSheet(self._STYLE_NORMAL)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -60,10 +62,35 @@ class PhotoTile(QFrame):
         )
         layout.addWidget(self._file_label)
 
+        # --- File size label ---
+        self._size_label = QLabel("")
+        self._size_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._size_label.setMaximumHeight(13)
+        self._size_label.setStyleSheet(
+            "color: #fff; font-size: 8px; background: transparent; padding: 0px;"
+        )
+        self._size_label.hide()
+        layout.addWidget(self._size_label)
+
         # --- Image viewer ---
         self.viewer = ZoomGraphicsView(self)
         self.viewer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout.addWidget(self.viewer)
+
+        # --- JSON text viewer ---
+        self._json_view = QPlainTextEdit()
+        self._json_view.setReadOnly(True)
+        self._json_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        font = QFont("Consolas, Courier New, monospace")
+        font.setPointSize(8)
+        font.setStyleHint(QFont.StyleHint.Monospace)
+        self._json_view.setFont(font)
+        self._json_view.setStyleSheet(
+            "QPlainTextEdit { background: #0d0d0d; color: #c8c8c8;"
+            " border: none; selection-background-color: #264f78; }"
+        )
+        self._json_view.hide()
+        layout.addWidget(self._json_view)
 
         # --- Overlay (loading / absent) ---
         self._overlay = QLabel("Absent")
@@ -83,24 +110,56 @@ class PhotoTile(QFrame):
     # State management
     # ------------------------------------------------------------------
 
-    def set_loading(self):
+    def set_loading(self, file_size: int = None):
         self._has_image = False
         self.viewer.clear_pixmap()
+        self._json_view.hide()
         self._file_label.setText("")
+        self._update_size_label(file_size)
         self._show_overlay("Chargement…")
 
     def set_absent(self):
         self._has_image = False
         self.viewer.clear_pixmap()
+        self._json_view.hide()
         self._file_label.setText("")
+        self._size_label.hide()
+        self._file_size = None
         self._show_overlay("Absent")
 
-    def set_pixmap(self, pixmap, filename: str = ""):
+    def set_pixmap(self, pixmap, filename: str = "", file_size: int = None):
         self._overlay.hide()
+        self._json_view.hide()
         self.viewer.show()
         self.viewer.set_pixmap(pixmap)
         self._file_label.setText(filename)
+        self._update_size_label(file_size)
         self._has_image = True
+
+    def set_json(self, padded_lines: list, file_size, diff_line_indices: set, gap_line_indices: set):
+        """Display LCS-aligned JSON content with diff and gap highlighting.
+
+        padded_lines     : list[str | None] — None entries are alignment gaps
+        diff_line_indices: row indices where this tile’s content differs
+        gap_line_indices : row indices where this tile has no line (None gap)
+        """
+        content = "\n".join(line if line is not None else "" for line in padded_lines)
+        self._overlay.hide()
+        self.viewer.hide()
+        self._json_view.show()
+        self._json_view.setPlainText(content)
+        self._apply_diff_highlighting(diff_line_indices, gap_line_indices)
+        self._update_size_label(file_size)
+        self._has_image = False
+
+    def set_json_absent(self):
+        """Show absent overlay in JSON mode."""
+        self.viewer.hide()
+        self._json_view.hide()
+        self._file_label.setText("")
+        self._size_label.hide()
+        self._file_size = None
+        self._show_overlay("Absent")
 
     def set_as_best(self, is_best: bool):
         self._is_best = is_best
@@ -109,6 +168,59 @@ class PhotoTile(QFrame):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _update_size_label(self, file_size: int = None):
+        if file_size is not None:
+            self._file_size = file_size
+        if self._file_size is not None:
+            self._size_label.setText(self._format_size(self._file_size))
+            self._size_label.show()
+        else:
+            self._size_label.hide()
+
+    @staticmethod
+    def _format_size(n: int) -> str:
+        """Return human-readable size with byte count, using French thin-space separator."""
+        def _fmt_bytes(v: int) -> str:
+            s = f"{v:,}".replace(",", "\u202f")  # narrow no-break space
+            return f"{s}\u202fo"
+
+        if n < 1024:
+            return _fmt_bytes(n)
+        elif n < 1024 * 1024:
+            return f"{n / 1024:.1f}\u202fKo ({_fmt_bytes(n)})"
+        else:
+            return f"{n / (1024 * 1024):.1f}\u202fMo ({_fmt_bytes(n)})"
+
+    def _apply_diff_highlighting(self, diff_line_indices: set, gap_line_indices: set = None):
+        """Highlight diff lines in yellow and gap lines in dark grey."""
+        if gap_line_indices is None:
+            gap_line_indices = set()
+
+        doc = self._json_view.document()
+        cursor = QTextCursor(doc)
+
+        diff_fmt = QTextBlockFormat()
+        diff_fmt.setBackground(QColor(255, 200, 0, 70))
+
+        gap_fmt = QTextBlockFormat()
+        gap_fmt.setBackground(QColor(40, 40, 40, 255))   # solid dark grey stripe
+
+        normal_fmt = QTextBlockFormat()
+        normal_fmt.setBackground(QColor(0, 0, 0, 0))
+
+        block = doc.begin()
+        i = 0
+        while block.isValid():
+            cursor.setPosition(block.position())
+            if i in gap_line_indices:
+                cursor.setBlockFormat(gap_fmt)
+            elif i in diff_line_indices:
+                cursor.setBlockFormat(diff_fmt)
+            else:
+                cursor.setBlockFormat(normal_fmt)
+            block = block.next()
+            i += 1
 
     def _show_overlay(self, text: str):
         self.viewer.hide()

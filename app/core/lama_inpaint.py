@@ -80,6 +80,9 @@ class LamaInpainter:
 
     def __init__(self) -> None:
         self._model: torch.jit.ScriptModule | None = None
+        self._device: torch.device = torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu"
+        )
 
     def is_loaded(self) -> bool:
         return self._model is not None
@@ -91,7 +94,7 @@ class LamaInpainter:
             from torch.hub import download_url_to_file
             os.makedirs(_CACHE_DIR, exist_ok=True)
             download_url_to_file(_LAMA_URL, _LAMA_PATH, progress=True)
-        self._model = torch.jit.load(_LAMA_PATH, map_location="cpu").eval()
+        self._model = torch.jit.load(_LAMA_PATH, map_location=self._device).eval()
 
     @torch.no_grad()
     def _forward_once(self, image_rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
@@ -102,12 +105,12 @@ class LamaInpainter:
         Retourne  : H x W x 3  uint8  BGR
         """
         h, w = image_rgb.shape[:2]
-        t_img  = torch.from_numpy(_norm(_pad_to_mod(image_rgb))).unsqueeze(0)
-        t_mask = torch.from_numpy(_norm(_pad_to_mod(mask))).unsqueeze(0)
+        t_img  = torch.from_numpy(_norm(_pad_to_mod(image_rgb))).unsqueeze(0).to(self._device)
+        t_mask = torch.from_numpy(_norm(_pad_to_mod(mask))).unsqueeze(0).to(self._device)
         t_mask = (t_mask > 0).float()
 
         out = self._model(t_img, t_mask)
-        res = out[0].permute(1, 2, 0).numpy()
+        res = out[0].permute(1, 2, 0).cpu().numpy()
         res = np.clip(res * 255, 0, 255).astype(np.uint8)[:h, :w]
         return cv2.cvtColor(res, cv2.COLOR_RGB2BGR)
 

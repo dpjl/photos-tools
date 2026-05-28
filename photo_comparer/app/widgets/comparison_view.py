@@ -19,9 +19,11 @@ restores the grid.
 """
 from __future__ import annotations
 
+import json as _json
 import math
+from difflib import SequenceMatcher
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 try:
     from shiboken6 import isValid as _qt_isvalid
@@ -63,6 +65,9 @@ class ComparisonView(QWidget):
         self._best_selections: dict = {}          # group_key → dir_index
         self._export_records: Dict[str, ExportRecord] = {}  # group_key → record
 
+        self._mode: str = "images"   # "images" or "json"
+        self._syncing_json_scroll: bool = False
+
         self._loader = ImageLoader(self)
         self._loader.image_loaded.connect(self._on_image_loaded)
 
@@ -102,6 +107,9 @@ class ComparisonView(QWidget):
             tile.viewer.viewport_changed.connect(
                 lambda cx, cy, z, src=i: self._sync_viewport(cx, cy, z, src)
             )
+            tile._json_view.verticalScrollBar().valueChanged.connect(
+                lambda val, src=i: self._sync_json_scroll(val, src)
+            )
             row, col = divmod(i, cols)
             self._layout.addWidget(tile, row, col)
             self._tiles.append(tile)
@@ -123,17 +131,21 @@ class ComparisonView(QWidget):
 
         stored_best = self._best_selections.get(group.key)
 
-        for i, tile in enumerate(self._tiles):
-            is_best = (stored_best == i)
-            tile.set_as_best(is_best)
-            path = group.get_photo(i)
-            if path is not None:
-                tile.set_loading()
-                key = f"{current_gen}:{i}"
-                self._pending_meta[key] = (tile, path)
-                self._loader.load(key, path)
-            else:
-                tile.set_absent()
+        if self._mode == "json":
+            self._load_json_group(group, stored_best)
+        else:
+            for i, tile in enumerate(self._tiles):
+                is_best = (stored_best == i)
+                tile.set_as_best(is_best)
+                path = group.get_photo(i)
+                if path is not None:
+                    file_size = self._safe_stat(path)
+                    tile.set_loading(file_size=file_size)
+                    key = f"{current_gen}:{i}"
+                    self._pending_meta[key] = (tile, path)
+                    self._loader.load(key, path)
+                else:
+                    tile.set_absent()
 
         # Restore best state for toolbar button
         if stored_best is not None and 0 <= stored_best < len(self._tiles):
@@ -149,6 +161,14 @@ class ComparisonView(QWidget):
             self._exported_bar.clear_record()
 
         self.group_loaded.emit(group.key)
+
+    def set_mode(self, mode: str):
+        """Switch between 'images' and 'json' display modes."""
+        if mode == self._mode:
+            return
+        self._mode = mode
+        if self._current_group is not None:
+            self.load_group(self._current_group)
 
     def exit_solo(self):
         if self._solo_index is not None:
@@ -200,7 +220,8 @@ class ComparisonView(QWidget):
             return
         if not _qt_isvalid(tile):
             return
-        tile.set_pixmap(QPixmap.fromImage(image), path.name)
+        file_size = self._safe_stat(path)
+        tile.set_pixmap(QPixmap.fromImage(image), path.name, file_size=file_size)
 
     def _clear_tiles(self):
         self._load_gen += 1               # invalidate any in-flight loads
@@ -224,11 +245,188 @@ class ComparisonView(QWidget):
         self._grid_cols = 0
         self._grid_rows = 0
 
+    # ------------------------------------------------------------------
+    # JSON mode
+    # ------------------------------------------------------------------
+
+    def _load_json_group(self, group: "PhotoGroup", stored_best: Optional[int]):
+        """Read JSON files for every tile and display with diff highlighting."""
+        contents: Dict[int, str] = {}
+        sizes: Dict[int, int] = {}
+        filenames: Dict[int, str] = {}
+
+        for i in range(len(self._tiles)):
+            path = group.jsons.get(i)
+            if path is None:
+                # Try to derive JSON path from image path (same dir, same stem prefix)
+                img_path = group.get_photo(i)
+                if img_path is not None:
+                    # Look for any <prefix>*.json in the same directory
+                    from ..utils.prefix_extractor import extract_prefix
+                    candidates = [
+                        f for f in img_path.parent.iterdir()
+                        if f.suffix.lower() == ".json"
+                        and extract_prefix(f.name) == group.key
+                    ]
+                    if candidates:
+                        path = candidates[0]
+            if path is not None and path.is_file():
+                try:
+                    raw = path.read_text(encoding="utf-8", errors="replace")
+                    sizes[i] = self._safe_stat(path)
+                    filenames[i] = path.name
+                    # Reformat JSON for consistent comparison
+                    try:
+                        parsed = _json.loads(raw)
+                        contents[i] = _json.dumps(
+                            parsed, sort_keys=True, indent=2, ensure_ascii=False
+                        )
+                    except (_json.JSONDecodeError, ValueError):
+                        contents[i] = raw  # fallback: raw text
+                except OSError:
+                    pass
+
+        aligned = self._compute_aligned_diff(contents)
+
+        for i, tile in enumerate(self._tiles):
+            is_best = (stored_best == i)
+            tile.set_as_best(is_best)
+            if i in aligned:
+                padded, diff_pos, gap_pos = aligned[i]
+                tile._file_label.setText(filenames.get(i, ""))
+                tile.set_json(padded, sizes.get(i), diff_pos, gap_pos)
+            else:
+                tile.set_json_absent()
+
+    @staticmethod
+    def _compute_aligned_diff(tile_contents: Dict[int, str]) -> dict:
+        """LCS-based multi-tile alignment.
+
+        Returns {tile_idx: (padded_lines, diff_positions, gap_positions)}.
+        padded_lines  : list[str | None]  — None marks an alignment gap
+        diff_positions: set[int]          — row indices where this tile differs
+        gap_positions : set[int]          — row indices where this tile has a gap
+        All padded_lines lists share the same length, enabling sync scrolling.
+        """
+        if not tile_contents:
+            return {}
+
+        sorted_idx = sorted(tile_contents.keys())
+
+        if len(sorted_idx) == 1:
+            idx = sorted_idx[0]
+            lines = tile_contents[idx].splitlines()
+            return {idx: (lines, set(), set())}
+
+        ref_idx = sorted_idx[0]
+        ref_lines = tile_contents[ref_idx].splitlines()
+        n_ref = len(ref_lines)
+
+        # For each non-ref tile compute:
+        #   at[r]          : what the tile has at ref position r (None = deleted)
+        #   ins_before[r]  : lines inserted in this tile before ref position r
+        #   after_extra[r] : extra tile lines after ref position r
+        #                    (from replace blocks where tile has more lines than ref)
+        tile_info: Dict[int, tuple] = {}
+        for idx in sorted_idx[1:]:
+            other = tile_contents[idx].splitlines()
+            sm = SequenceMatcher(None, ref_lines, other, autojunk=False)
+            at: dict = {}
+            ins_before: dict = {}
+            after_extra: dict = {}
+
+            for tag, i1, i2, j1, j2 in sm.get_opcodes():
+                la, lb = i2 - i1, j2 - j1
+                if tag == "equal":
+                    for k in range(la):
+                        at[i1 + k] = other[j1 + k]
+                elif tag == "replace":
+                    paired = min(la, lb)
+                    for k in range(paired):
+                        at[i1 + k] = other[j1 + k]
+                    for k in range(paired, la):     # extra ref lines → gap in tile
+                        at[i1 + k] = None
+                    if lb > la:                     # extra tile lines → gap in ref
+                        after_extra.setdefault(i2 - 1, []).extend(other[j1 + la: j2])
+                elif tag == "delete":
+                    for k in range(la):
+                        at[i1 + k] = None
+                elif tag == "insert":
+                    ins_before.setdefault(i1, []).extend(other[j1:j2])
+
+            tile_info[idx] = (at, ins_before, after_extra)
+
+        # Build virtual rows: each row is {tile_idx: str_or_None}
+        virtual_rows: list = []
+
+        def _empty_row() -> dict:
+            return {i: None for i in sorted_idx}
+
+        for r in range(n_ref + 1):
+            # Insertions before ref pos r — one virtual row per line, per tile
+            for idx in sorted_idx[1:]:
+                for line in tile_info[idx][1].get(r, []):
+                    row = _empty_row()
+                    row[idx] = line
+                    virtual_rows.append(row)
+
+            if r < n_ref:
+                # Main row: one line from each tile aligned to ref pos r
+                row = _empty_row()
+                row[ref_idx] = ref_lines[r]
+                for idx in sorted_idx[1:]:
+                    row[idx] = tile_info[idx][0].get(r)   # None if deleted
+                virtual_rows.append(row)
+
+                # After-extra rows (tile has more lines than ref in a replace block)
+                for idx in sorted_idx[1:]:
+                    for line in tile_info[idx][2].get(r, []):
+                        row = _empty_row()
+                        row[idx] = line
+                        virtual_rows.append(row)
+
+        # Compute per-tile padded lists, diff positions, gap positions
+        result: dict = {}
+        for idx in sorted_idx:
+            padded: list = []
+            diff_pos: set = set()
+            gap_pos: set = set()
+            for row_i, row in enumerate(virtual_rows):
+                val = row[idx]
+                padded.append(val)
+                if val is None:
+                    gap_pos.add(row_i)
+                else:
+                    # Highlight if any tile disagrees at this row
+                    if len(set(row.values())) > 1:
+                        diff_pos.add(row_i)
+            result[idx] = (padded, diff_pos, gap_pos)
+
+        return result
+
+    @staticmethod
+    def _safe_stat(path) -> Optional[int]:
+        """Return file size in bytes, or None on error."""
+        try:
+            return path.stat().st_size
+        except OSError:
+            return None
+
     @staticmethod
     def _compute_grid(n: int):
         cols = math.ceil(math.sqrt(n))
         rows = math.ceil(n / cols)
         return rows, cols
+
+    def _sync_json_scroll(self, value: int, source_idx: int):
+        """Synchronise the JSON text-view scrollbars across all tiles."""
+        if self._syncing_json_scroll:
+            return
+        self._syncing_json_scroll = True
+        for i, tile in enumerate(self._tiles):
+            if i != source_idx:
+                tile._json_view.verticalScrollBar().setValue(value)
+        self._syncing_json_scroll = False
 
     def _sync_viewport(self, cx: float, cy: float, zoom: float, source_idx: int):
         for i, tile in enumerate(self._tiles):
