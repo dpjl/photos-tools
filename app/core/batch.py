@@ -19,6 +19,9 @@ import numpy as np
 # Extensions d'image acceptées
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp"}
 
+# Fichier de session batch (mémorise output_dir et autres préférences de session)
+_SESSION_FILENAME = ".batch_session.json"
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Configuration par image
@@ -110,6 +113,17 @@ class BatchSession:
         # Dossier de sortie par défaut : sous-dossier "batch_output"
         self.output_dir = os.path.join(path, "batch_output")
 
+        # Restaurer le dossier de sortie de la session précédente si disponible
+        session_path = os.path.join(path, _SESSION_FILENAME)
+        if os.path.exists(session_path):
+            try:
+                with open(session_path, encoding="utf-8") as _f:
+                    _meta = json.load(_f)
+                if _meta.get("output_dir"):
+                    self.output_dir = _meta["output_dir"]
+            except Exception:
+                pass
+
         entries = sorted(
             e for e in os.listdir(path)
             if os.path.splitext(e)[1].lower() in IMAGE_EXTENSIONS
@@ -136,6 +150,17 @@ class BatchSession:
             step_params     = {k: dict(v) for k, v in d.step_params.items()},
             wb_patch_radius = d.wb_patch_radius,
         )
+
+    def save_session_meta(self) -> None:
+        """Persiste les préférences de session (output_dir) dans .batch_session.json."""
+        if not self.source_dir:
+            return
+        path = os.path.join(self.source_dir, _SESSION_FILENAME)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"output_dir": self.output_dir}, f, ensure_ascii=False)
+        except Exception:
+            pass
 
     def reset_to_defaults(self, config: BatchImageConfig) -> None:
         """Réinitialise une config aux valeurs du batch defaults."""

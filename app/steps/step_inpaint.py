@@ -29,13 +29,13 @@ class InpaintStep(StepBase):
     param_defs = [
         {
             "key":     "auto_detect",
-            "label":   "Détection auto des artefacts",
+            "label":   "Détection auto",
             "type":    "bool",
             "default": False,
         },
         {
             "key":     "sensitivity",
-            "label":   "Sensibilité détection (0-100)",
+            "label":   "Sensibilité",
             "type":    "int",
             "default": 50,
             "min":     0,

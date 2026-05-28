@@ -22,11 +22,11 @@ class SCUNetStep(StepBase):
     slow       = True
 
     param_defs = [
-        {"key": "mode", "label": "Mode SCUNet", "type": "choice",
-         "default": "gan", "choices": ["gan", "psnr"]},
-        {"key": "protect_faces", "label": "Protéger les visages GFPGAN", "type": "bool",
+        {"key": "mode", "label": "Mode", "type": "choice",
+         "as_buttons": True, "default": "gan", "choices": ["gan", "psnr"]},
+        {"key": "protect_faces", "label": "Protéger visages", "type": "bool",
          "default": True},
-        {"key": "expand", "label": "Expansion masque visage (%)", "type": "float",
+        {"key": "expand", "label": "Expansion visage", "type": "float",
          "default": 0.4, "min": 0.0, "max": 1.0, "step": 0.05},
     ]
 

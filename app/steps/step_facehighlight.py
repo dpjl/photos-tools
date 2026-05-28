@@ -50,12 +50,13 @@ class FaceHighlightStep(StepBase):
             "key": "profil",
             "label": "Mode",
             "type": "choice",
+            "as_buttons": True,
             "default": "auto",
             "choices": ["auto", "personnalisé"],
         },
         {
             "key": "highlights",
-            "label": "Hautes lumieres (0-100)",
+            "label": "Hautes lumières",
             "type": "int",
             "default": 100,
             "min": 0,
@@ -64,7 +65,7 @@ class FaceHighlightStep(StepBase):
         },
         {
             "key": "hl_tonal_width",
-            "label": "Etendue tonale HL (1-100)",
+            "label": "Étendue HL",
             "type": "int",
             "default": 58,
             "min": 1,
@@ -73,7 +74,7 @@ class FaceHighlightStep(StepBase):
         },
         {
             "key": "shadows",
-            "label": "Ombres (0-100)",
+            "label": "Ombres",
             "type": "int",
             "default": 0,
             "min": 0,
@@ -82,7 +83,7 @@ class FaceHighlightStep(StepBase):
         },
         {
             "key": "sh_tonal_width",
-            "label": "Etendue tonale ombres (1-100)",
+            "label": "Étendue ombres",
             "type": "int",
             "default": 30,
             "min": 1,
@@ -91,7 +92,7 @@ class FaceHighlightStep(StepBase):
         },
         {
             "key": "radius",
-            "label": "Rayon filtre (1-100)",
+            "label": "Rayon filtre",
             "type": "int",
             "default": 40,
             "min": 1,

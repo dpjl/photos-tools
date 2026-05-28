@@ -16,6 +16,7 @@ Chaque image possède sa propre configuration (step_order, params, masque, WB).
 from __future__ import annotations
 
 import copy
+import json
 import os
 from typing import Optional
 
@@ -28,16 +29,21 @@ from PyQt6.QtWidgets import (
     QFileDialog, QStatusBar, QSizePolicy, QMessageBox,
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSlot, pyqtSignal, QObject
-from PyQt6.QtGui import QCloseEvent
+from PyQt6.QtGui import QCloseEvent, QUndoStack, QKeySequence, QShortcut
 
 from core.pipeline import PipelineWorker
-from core.batch import BatchSession, BatchImageConfig, build_step_log, save_recipe
+from core.batch import (
+    BatchSession, BatchImageConfig, build_step_log,
+    save_recipe, load_recipe, _apply_recipe,
+)
 from steps import ALL_STEPS
 from ui.step_panel import StepListWidget
 from ui.batch_thumbnail_strip import BatchThumbnailStrip
 from ui.mask_editor import MaskCanvasPanel
 from ui.wb_picker import WBPickerPanel
 from ui.image_view import SyncedImageView
+from ui.json_diff_panel import JsonDiffPanel
+from ui.param_history import SetParamCommand, PropagateParamCommand, PropagateEnabledCommand, MoveStepCommand, ToggleStepCommand
 
 # Étapes dont les paramètres déclenchent un aperçu rapide
 _FAST_PREVIEW_IDS = frozenset({"color", "facehighlight", "ddcolor_lut", "autocolor", "wb",
@@ -69,8 +75,25 @@ class BatchWindow(QMainWindow):
         self._preview_timer.setInterval(300)
         self._preview_timer.timeout.connect(self._do_preview_update)
 
+        # Undo/Redo — pile locale à l'image courante
+        self._undo_stack = QUndoStack(self)
+        # Buffer pour regrouper les changements de preset en une macro
+        self._preset_buf: list = []
+        self._preset_flush_pending = False
+        # Flag pour éviter de push une 2ème commande lors du redo/undo d'un réordre
+        self._applying_order = False
+        # Flag pour éviter de push lors du redo/undo d'activation
+        self._applying_enabled = False
+        # État de zoom partagé entre les onglets
+        self._prev_tab_index: int = 0
+        self._shared_zoom: Optional[tuple] = None
+
         self._build_ui()
         self._apply_theme()
+
+        # Raccourcis undo/redo : route vers le bon canvas selon l'onglet actif
+        QShortcut(QKeySequence("Ctrl+Z"), self, self._undo)
+        QShortcut(QKeySequence("Ctrl+Y"), self, self._redo)
 
         # Sélectionner la première image si présente
         if session.images:
@@ -173,21 +196,36 @@ class BatchWindow(QMainWindow):
 
         # ── Panneau gauche : liste des étapes ─────────────────────────────────
         step_container = QWidget()
-        step_container.setMinimumWidth(250)
-        step_container.setMaximumWidth(380)
+        step_container.setMinimumWidth(240)
+        step_container.setMaximumWidth(340)
         step_container.setStyleSheet("background:#16162a;")
         scl = QVBoxLayout(step_container)
         scl.setContentsMargins(0, 0, 0, 0)
         scl.setSpacing(0)
 
-        hdr = QLabel("Étapes — par image")
-        hdr.setFixedHeight(32)
-        hdr.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        hdr.setStyleSheet(
-            "background:#1e1e38; color:#ddd; font-size:12px; font-weight:700;"
-            " border-bottom:1px solid #2a2a4a;"
+        hdr_w = QWidget()
+        hdr_w.setFixedHeight(32)
+        hdr_w.setStyleSheet("background:#1e1e38; border-bottom:1px solid #2a2a4a;")
+        hdr_lay = QHBoxLayout(hdr_w)
+        hdr_lay.setContentsMargins(12, 0, 4, 0)
+        hdr_lay.setSpacing(4)
+        hdr_lbl = QLabel("Étapes — par image")
+        hdr_lbl.setStyleSheet("color:#ddd; font-size:12px; font-weight:700;")
+        hdr_lay.addWidget(hdr_lbl, stretch=1)
+        self._reload_recipe_btn = QPushButton("↺")
+        self._reload_recipe_btn.setFixedSize(24, 24)
+        self._reload_recipe_btn.setToolTip(
+            "Recharger depuis le fichier .recipe.json sur disque\n"
+            "(annule les modifications non sauvegardées)"
         )
-        scl.addWidget(hdr)
+        self._reload_recipe_btn.setStyleSheet(
+            "QPushButton { background:#2a2a4a; color:#9de; border-radius:4px;"
+            "  font-size:14px; }"
+            "QPushButton:hover { background:#3a3a6a; color:#cef; }"
+        )
+        self._reload_recipe_btn.clicked.connect(self._reload_from_disk)
+        hdr_lay.addWidget(self._reload_recipe_btn)
+        scl.addWidget(hdr_w)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -195,9 +233,13 @@ class BatchWindow(QMainWindow):
 
         self._step_list = StepListWidget()
         self._step_list.add_steps(ALL_STEPS)
+        self._step_list.set_batch_mode(True)  # active les boutons ⬇ de propagation
         self._step_list.order_changed.connect(self._on_order_changed)
         self._step_list.param_changed.connect(self._on_param_changed)
+        self._step_list.param_propagate_requested.connect(self._on_param_propagate)
         self._step_list.enabled_changed.connect(self._on_enabled_changed)
+        self._step_list.enabled_propagate_requested.connect(self._on_enabled_propagate)
+        self._step_list.order_reordered.connect(self._on_order_reordered)
         self._step_list.mask_edit_requested.connect(self._on_mask_edit_requested)
         self._step_list.color_picker_requested.connect(self._on_color_picker_requested)
         scroll.setWidget(self._step_list)
@@ -226,19 +268,31 @@ class BatchWindow(QMainWindow):
         )
 
         # Créer les panneaux avec une image 1×1 — mis à jour dès la première navigation
+        _SIDEBAR_W = 215  # largeur unifiée pour tous les onglets
         _dummy = np.zeros((1, 1, 3), dtype=np.uint8)
-        self._mask_panel = MaskCanvasPanel(_dummy, None, show_ok_cancel=False)
+        self._mask_panel = MaskCanvasPanel(_dummy, None, show_ok_cancel=False,
+                                           sidebar_width=_SIDEBAR_W)
         self._wb_panel   = WBPickerPanel(
-            _dummy, None, show_ok_cancel=False, sidebar_width=210
+            _dummy, None, show_ok_cancel=False, sidebar_width=_SIDEBAR_W
         )
         # Onglets d'aperçu image (zoom/pan via SyncedImageView)
         self._origin_view = SyncedImageView()
         self._dest_view   = SyncedImageView()
+        # Sync bidirectionnelle désactivée : gérée manuellement par _shared_zoom
+        # self._origin_view.add_peer(self._dest_view)
 
-        self._tabs.addTab(self._mask_panel,   "Masque")     # index 0
-        self._tabs.addTab(self._wb_panel,     "Blanc")      # index 1
-        self._tabs.addTab(self._origin_view,  "Originale")  # index 2
-        self._tabs.addTab(self._dest_view,    "Résultat")   # index 3
+        self._tabs.addTab(self._mask_panel,                               "Masque")    # 0
+        self._tabs.addTab(self._wb_panel,                                 "Blanc")     # 1
+        self._tabs.addTab(self._wrap_with_sidebar(self._origin_view, _SIDEBAR_W), "Originale")  # 2
+        self._tabs.addTab(self._wrap_with_sidebar(self._dest_view,   _SIDEBAR_W), "Résultat")   # 3
+
+        # Onglets diff JSON
+        self._diff_source_panel = JsonDiffPanel()
+        self._diff_source_panel.set_refresh_fn(self._refresh_diff_source)
+        self._diff_result_panel = JsonDiffPanel()
+        self._diff_result_panel.set_refresh_fn(self._refresh_diff_result)
+        self._tabs.addTab(self._diff_source_panel, "Δ Recipe")   # 4
+        self._tabs.addTab(self._diff_result_panel, "Δ Résultat")  # 5
         self._tabs.currentChanged.connect(self._on_tab_changed)
         rl.addWidget(self._tabs)
 
@@ -249,8 +303,23 @@ class BatchWindow(QMainWindow):
 
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([280, 1200])
+        splitter.setSizes([340, 1200])
         return splitter
+
+    @staticmethod
+    def _wrap_with_sidebar(view: QWidget, sidebar_width: int) -> QWidget:
+        """Enveloppe view dans un QWidget avec un spacer fixe à droite de même largeur
+        que les sidebars Masque/Blanc, pour que l'espace image soit identique partout."""
+        wrapper = QWidget()
+        lay = QHBoxLayout(wrapper)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.addWidget(view, stretch=1)
+        spacer = QWidget()
+        spacer.setFixedWidth(sidebar_width)
+        spacer.setStyleSheet("background: #1a1a2e;")
+        lay.addWidget(spacer)
+        return wrapper
 
     # ══════════════════════════════════════════════════════════════════════════
     # Navigation entre images
@@ -266,6 +335,8 @@ class BatchWindow(QMainWindow):
 
     def _navigate_to(self, cfg: BatchImageConfig) -> None:
         """Charge la configuration d'une image dans l'UI."""
+        # Réinitialiser le zoom partagé → chaque nouvelle image commence au fit
+        self._shared_zoom = None
         self._current_cfg = cfg
 
         # ── Image originale ───────────────────────────────────────────────────
@@ -295,7 +366,7 @@ class BatchWindow(QMainWindow):
         self._origin_view.set_image(img)
 
         # ── Onglet Résultat (chargement lazeux si onglet actif) ───────────────
-        if self._tabs.currentWidget() is self._dest_view:
+        if self._tabs.currentIndex() == 3:
             self._update_dest_view(cfg)
         else:
             self._dest_view.set_image(None)
@@ -305,6 +376,8 @@ class BatchWindow(QMainWindow):
 
         # Mettre à jour les panneaux (mosaïque ou aperçu rapide)
         self._schedule_preview_update()
+        # Actualiser les onglets diff si actifs
+        self._refresh_if_diff_tab()
 
     def _save_current_state(self) -> None:
         """Sauvegarde l'état courant de l'UI dans _current_cfg."""
@@ -318,6 +391,10 @@ class BatchWindow(QMainWindow):
         cfg.wb_pick         = self._wb_panel.get_pick_point()
         cfg.wb_patch_radius = self._wb_panel.get_patch_radius()
         save_recipe(cfg)
+        # Vider la pile undo : chaque image a sa propre histoire de changements
+        self._undo_stack.clear()
+        self._preset_buf.clear()
+        self._preset_flush_pending = False
 
     def _config_for(self, file_path: str) -> Optional[BatchImageConfig]:
         for cfg in self._session.images:
@@ -331,28 +408,210 @@ class BatchWindow(QMainWindow):
 
     @pyqtSlot(list)
     def _on_order_changed(self, order: list[str]) -> None:
-        if self._current_cfg:
+        if not self._applying_order and self._current_cfg:
             self._current_cfg.step_order = order
             self._mark_customized()
+
+    @pyqtSlot(list, list)
+    def _on_order_reordered(self, old_order: list, new_order: list) -> None:
+        """Push une commande undo pour le réordonnancement."""
+        if self._applying_order:
+            return
+        cfg = self._current_cfg
+        def apply(order: list) -> None:
+            self._applying_order = True
+            self._step_list.set_order(order)
+            if cfg:
+                cfg.step_order = order
+            self._applying_order = False
+        cmd = MoveStepCommand(
+            step_id   = new_order[0] if new_order else "",
+            old_order = old_order,
+            new_order = new_order,
+            apply_fn  = apply,
+        )
+        self._undo_stack.push(cmd)
 
     @pyqtSlot(str, str, object)
     def _on_param_changed(self, step_id: str, key: str, value) -> None:
         if self._current_cfg:
+            # Capturer old_val AVANT mise à jour (step_params sert de snapshot)
+            old_val = self._current_cfg.step_params.get(step_id, {}).get(key)
             self._current_cfg.step_params.setdefault(step_id, {})[key] = value
             # Ne pas marquer customized lors du chargement automatique d'un preset de profil
             panel = self._step_list.get_panel(step_id)
-            if panel is None or not panel.is_loading_preset():
+            is_preset = panel is not None and panel.is_loading_preset()
+            if not is_preset:
                 self._mark_customized()
+
+            # Enregistrer dans la pile undo
+            if is_preset:
+                self._preset_buf.append((step_id, key, old_val, value))
+                if not self._preset_flush_pending:
+                    self._preset_flush_pending = True
+                    from PyQt6.QtCore import QTimer as _QTimer
+                    _QTimer.singleShot(0, self._flush_preset_undo)
+            else:
+                if self._preset_buf:
+                    self._flush_preset_undo()
+                cmd = SetParamCommand(
+                    self._apply_param_silent, step_id, key, old_val, value
+                )
+                self._undo_stack.push(cmd)
+
         if step_id in _FAST_PREVIEW_IDS:
             self._schedule_preview_update()
 
+    def _apply_param_silent(self, step_id: str, key: str, val) -> None:
+        """Applique val silencieusement (undo/redo) : widget + cfg.step_params + preview."""
+        if self._current_cfg:
+            self._current_cfg.step_params.setdefault(step_id, {})[key] = val
+        panel = self._step_list.get_panel(step_id)
+        if panel:
+            row = panel._param_rows.get(key)
+            if row is not None:
+                row.set_value(val)  # _block=True, pas de signal
+        if step_id in _FAST_PREVIEW_IDS:
+            self._schedule_preview_update()
+
+    def _flush_preset_undo(self) -> None:
+        """Vide le buffer preset et pousse une macro undo regroupant tous les changements."""
+        self._preset_flush_pending = False
+        buf = self._preset_buf
+        self._preset_buf = []
+        if not buf:
+            return
+        self._undo_stack.beginMacro("Changer profil")
+        for sid, key, old, new in buf:
+            cmd = SetParamCommand(self._apply_param_silent, sid, key, old, new)
+            self._undo_stack.push(cmd)  # redo() immédiat → no-op (_first=True)
+        self._undo_stack.endMacro()
+
+    @pyqtSlot(str, str, object)
+    def _on_param_propagate(self, step_id: str, key: str, value) -> None:
+        """Propage un seul paramètre aux images sélectionnées (ou toutes si aucune)."""
+        self._save_current_state()
+
+        # Déterminer les images cibles
+        run_paths = self._strip.get_run_selection()
+        if run_paths:
+            targets = [c for c in self._session.images if c.file_path in set(run_paths)]
+        else:
+            targets = list(self._session.images)
+
+        if not targets:
+            return
+
+        # Snapshot des anciennes valeurs avant propagation
+        old_vals = {
+            cfg.file_path: cfg.step_params.get(step_id, {}).get(key)
+            for cfg in targets
+        }
+
+        # Appliquer immédiatement
+        for cfg in targets:
+            cfg.step_params.setdefault(step_id, {})[key] = value
+            save_recipe(cfg)
+
+        # Mettre à jour l'UI si l'image courante est dans les cibles
+        if self._current_cfg in targets:
+            panel = self._step_list.get_panel(step_id)
+            if panel:
+                row = panel._param_rows.get(key)
+                if row is not None:
+                    row.set_value(value)
+            if step_id in _FAST_PREVIEW_IDS:
+                self._schedule_preview_update()
+
+        # Pousser la commande undo (le _first=True fait que redo() est no-op au push)
+        cmd = PropagateParamCommand(
+            step_id, key, value,
+            targets, old_vals,
+            lambda: self._current_cfg,
+            self._apply_param_silent,
+            save_recipe,
+        )
+        self._undo_stack.push(cmd)
+
+        n = len(targets)
+        self._statusbar.showMessage(f"Paramètre « {key} » propagé à {n} image(s).")
+
+    @pyqtSlot(str, bool)
+    def _on_enabled_propagate(self, step_id: str, enabled: bool) -> None:
+        """Propage l'état activé/désactivé d'une étape aux images sélectionnées."""
+        self._save_current_state()
+
+        run_paths = self._strip.get_run_selection()
+        if run_paths:
+            targets = [c for c in self._session.images if c.file_path in set(run_paths)]
+        else:
+            targets = list(self._session.images)
+
+        if not targets:
+            return
+
+        # Snapshot des anciennes valeurs avant propagation
+        old_vals = {cfg.file_path: cfg.step_enabled.get(step_id) for cfg in targets}
+
+        # Appliquer immédiatement
+        for cfg in targets:
+            cfg.step_enabled[step_id] = enabled
+            save_recipe(cfg)
+
+        # Mettre à jour l'UI si l'image courante est dans les cibles
+        if self._current_cfg in targets:
+            panel = self._step_list.get_panel(step_id)
+            if panel:
+                panel.set_enabled(enabled)
+
+        # Undo : commande dédiée
+        def _apply_enabled_ui(sid: str, val: bool) -> None:
+            p = self._step_list.get_panel(sid)
+            if p:
+                p.set_enabled(val)
+
+        cmd = PropagateEnabledCommand(
+            step_id, enabled, targets, old_vals,
+            lambda: self._current_cfg,
+            _apply_enabled_ui,
+            save_recipe,
+        )
+        self._undo_stack.push(cmd)
+
+        n = len(targets)
+        state_str = "activé" if enabled else "désactivé"
+        self._statusbar.showMessage(f"Étape « {step_id} » {state_str} sur {n} image(s).")
+
     @pyqtSlot(str, bool)
     def _on_enabled_changed(self, step_id: str, enabled: bool) -> None:
+        if self._applying_enabled:
+            return
+        # Capturer l'ancienne valeur avant mise à jour
+        old_val = None
         if self._current_cfg:
+            old_val = self._current_cfg.step_enabled.get(step_id)
             self._current_cfg.step_enabled[step_id] = enabled
             self._mark_customized()
         if step_id in _FAST_PREVIEW_IDS:
             self._schedule_preview_update()
+        # Pousser la commande undo
+        if old_val is not None and old_val != enabled:
+            cmd = ToggleStepCommand(
+                self._apply_enabled_silent, step_id, old_val, enabled
+            )
+            self._undo_stack.push(cmd)
+
+    def _apply_enabled_silent(self, step_id: str, val: bool) -> None:
+        """Applique l'état activé sans émettre de commande undo (utilisé par undo/redo)."""
+        self._applying_enabled = True
+        panel = self._step_list.get_panel(step_id)
+        if panel:
+            panel._enable_cb.blockSignals(True)
+            panel._enable_cb.setChecked(val)
+            panel._enable_cb.blockSignals(False)
+        if self._current_cfg:
+            self._current_cfg.step_enabled[step_id] = val
+        self._applying_enabled = False
 
     @pyqtSlot(str)
     def _on_mask_edit_requested(self, step_id: str) -> None:
@@ -363,6 +622,32 @@ class BatchWindow(QMainWindow):
     def _on_color_picker_requested(self, step_id: str) -> None:
         """Bascule sur l'onglet Blanc."""
         self._tabs.setCurrentIndex(1)
+
+    def _undo(self) -> None:
+        """Ctrl+Z : route vers le bon gestionnaire selon l'onglet actif."""
+        idx = self._tabs.currentIndex()
+        if idx == 0:    # Masque
+            self._mask_panel._canvas.undo()
+        elif idx == 1:  # Blanc
+            self._wb_panel._canvas.undo()
+            # Sync cfg.wb_pick : undo() ne peut pas émettre pick_changed(None)
+            if self._current_cfg:
+                self._current_cfg.wb_pick = self._wb_panel._canvas._pick_pt
+        else:
+            self._undo_stack.undo()
+
+    def _redo(self) -> None:
+        """Ctrl+Y : route vers le bon gestionnaire selon l'onglet actif."""
+        idx = self._tabs.currentIndex()
+        if idx == 0:    # Masque
+            self._mask_panel._canvas.redo()
+        elif idx == 1:  # Blanc
+            self._wb_panel._canvas.redo()
+            # Sync cfg.wb_pick après redo
+            if self._current_cfg:
+                self._current_cfg.wb_pick = self._wb_panel._canvas._pick_pt
+        else:
+            self._undo_stack.redo()
 
     # ══════════════════════════════════════════════════════════════════════════
     # Aperçu rapide — mosaïque ou panneau unique (Masque / Blanc)
@@ -390,10 +675,50 @@ class BatchWindow(QMainWindow):
 
     @pyqtSlot(int)
     def _on_tab_changed(self, index: int) -> None:
-        """Au changement d'onglet : charge le résultat si nécessaire, lance l'aperçu."""
-        if self._tabs.currentWidget() is self._dest_view and self._current_cfg is not None:
+        """Au changement d'onglet : synchronise le zoom et charge le résultat si nécessaire."""
+        from PyQt6.QtCore import QTimer
+
+        # 1. Sauvegarder le zoom de l'onglet qu'on quitte (seulement si actif et visible)
+        prev_canvas = self._get_tab_canvas(self._prev_tab_index)
+        if prev_canvas is not None and hasattr(prev_canvas, "get_zoom_state"):
+            state = prev_canvas.get_zoom_state()
+            if state[0] > 0:  # état valide
+                self._shared_zoom = state
+        self._prev_tab_index = index
+
+        # 2. Charger le résultat si besoin (AVANT d'appliquer le zoom)
+        if index == 3 and self._current_cfg is not None:
             self._update_dest_view(self._current_cfg)
+
+        # 3. Actualiser les onglets diff
+        if index == 4:
+            self._refresh_diff_source()
+        elif index == 5:
+            self._refresh_diff_result()
+
+        # 4. Appliquer le zoom au nouveau canvas, différé après le layout Qt
+        #    (set_image appelle fit_in_view → sans différé, le zoom serait écrasé)
+        zoom = self._shared_zoom
+        if zoom is not None:
+            new_canvas = self._get_tab_canvas(index)
+            if new_canvas is not None and hasattr(new_canvas, "apply_zoom_state"):
+                QTimer.singleShot(
+                    0, lambda c=new_canvas, z=zoom: c.apply_zoom_state(*z)
+                )
+
         self._schedule_preview_update()
+
+    def _get_tab_canvas(self, index: int):
+        """Retourne le canvas zôomable de l'onglet (index 0–3) ou None."""
+        if index == 0:
+            return self._mask_panel._canvas
+        if index == 1:
+            return self._wb_panel._canvas
+        if index == 2:
+            return self._origin_view
+        if index == 3:
+            return self._dest_view
+        return None
 
     def _schedule_preview_update(self) -> None:
         """Lance le timer debounce (300 ms) pour mettre à jour l'aperçu."""
@@ -445,15 +770,15 @@ class BatchWindow(QMainWindow):
     def _refresh_panels(self, img: np.ndarray) -> None:
         """Met à jour les panneaux Masque et Blanc avec l'image fournie.
 
-        Le point WB courant est récupéré depuis le canvas (l'utilisateur
-        peut l'avoir bougé sans qu'on ait encore sauvegardé).
+        N'utilise que set_display_image sur le canvas masque pour préserver
+        le masque en cours de dessin (ne pas écraser avec cfg.inpaint_mask).
         """
         if self._current_cfg is None:
             return
-        cfg = self._current_cfg
         current_pick   = self._wb_panel.get_pick_point()
         current_radius = self._wb_panel.get_patch_radius()
-        self._mask_panel.set_image(img, cfg.inpaint_mask)
+        # set_display_image : met à jour l'image affichée sans toucher au masque
+        self._mask_panel._canvas.set_display_image(img)
         self._wb_panel.set_image(img, current_pick, current_radius)
 
     # ── Helpers image résultat ────────────────────────────────────────────────
@@ -474,6 +799,90 @@ class BatchWindow(QMainWindow):
         """Met à jour l'onglet Résultat depuis le disque (chargement à la demande)."""
         result = self._get_result_from_disk(cfg)
         self._dest_view.set_image(result)
+
+    def _reload_from_disk(self) -> None:
+        """Recharge le recipe .json depuis le disque et réinitialise l'UI."""
+        cfg = self._current_cfg
+        if cfg is None:
+            self._statusbar.showMessage("Aucune image sélectionnée.")
+            return
+        recipe = load_recipe(cfg.file_path)
+        if recipe is None:
+            self._statusbar.showMessage(
+                f"Aucun recipe .json trouvé pour : {os.path.basename(cfg.file_path)}"
+            )
+            return
+        _apply_recipe(cfg, recipe)
+        self._navigate_to(cfg)
+        self._undo_stack.clear()
+        self._statusbar.showMessage(
+            f"Recipe rechargé depuis le disque : {os.path.basename(cfg.file_path)}"
+        )
+
+    def _current_recipe_dict(self) -> Optional[dict]:
+        """Génère le dict recipe depuis l'état actuel de l'UI (non encore sauvegardé)."""
+        cfg = self._current_cfg
+        if cfg is None:
+            return None
+        pick    = self._wb_panel.get_pick_point()
+        canvas  = self._mask_panel._canvas
+        has_mask = canvas._mask is not None and bool(canvas._mask.any())
+        return {
+            "version":        1,
+            "customized":     getattr(cfg, "customized", False),
+            "step_order":     self._step_list.get_order(),
+            "step_enabled":   self._step_list.get_enabled(),
+            "step_params":    self._step_list.get_all_params(),
+            "wb_pick":        list(pick) if pick else None,
+            "wb_patch_radius": self._wb_panel.get_patch_radius(),
+            "has_mask":       has_mask,
+        }
+
+    def _refresh_diff_source(self) -> None:
+        """Actualise l'onglet Δ Recipe : actuel vs .recipe.json sur disque."""
+        current = self._current_recipe_dict()
+        if current is None:
+            self._diff_source_panel.update_diff(None, None)
+            return
+        disk = load_recipe(self._current_cfg.file_path)
+        if disk is not None:
+            disk.pop("_mask", None)   # éviter d'afficher le tableau binaire
+        stem = os.path.splitext(os.path.basename(self._current_cfg.file_path))[0]
+        self._diff_source_panel.update_diff(
+            current, disk,
+            left_label  = f"{stem} (actuel)",
+            right_label = f"{stem}.recipe.json (disque)",
+        )
+
+    def _refresh_diff_result(self) -> None:
+        """Actualise l'onglet Δ Résultat : actuel vs .result.json dans output_dir."""
+        current = self._current_recipe_dict()
+        if current is None:
+            self._diff_result_panel.update_diff(None, None)
+            return
+        stem      = os.path.splitext(os.path.basename(self._current_cfg.file_path))[0]
+        disk      = None
+        if self._session.output_dir:
+            result_path = os.path.join(self._session.output_dir, stem + ".result.json")
+            if os.path.exists(result_path):
+                try:
+                    with open(result_path, encoding="utf-8") as f:
+                        disk = json.load(f)
+                except Exception:
+                    pass
+        self._diff_result_panel.update_diff(
+            current, disk,
+            left_label  = f"{stem} (actuel)",
+            right_label = f"{stem}.result.json (sortie)",
+        )
+
+    def _refresh_if_diff_tab(self) -> None:
+        """Actualise le panneau diff si l'onglet actif est un onglet diff."""
+        idx = self._tabs.currentIndex()
+        if idx == 4:
+            self._refresh_diff_source()
+        elif idx == 5:
+            self._refresh_diff_result()
 
     # ══════════════════════════════════════════════════════════════════════════
     # Lancer la sélection
@@ -665,7 +1074,7 @@ class BatchWindow(QMainWindow):
             if cfg is self._current_cfg:
                 self._mask_panel.set_image(result_img, cfg.inpaint_mask)
                 self._wb_panel.set_image(result_img, cfg.wb_pick, cfg.wb_patch_radius)
-                if self._tabs.currentWidget() is self._dest_view:
+                if self._tabs.currentIndex() == 3:
                     self._dest_view.set_image(result_img)
             # result_img n'est pas stocké dans cfg — libéré après écriture disque.
 
@@ -737,6 +1146,7 @@ class BatchWindow(QMainWindow):
             self._session.output_dir = path
             self._output_lbl.setText(path)
             self._output_lbl.setToolTip(path)
+            self._session.save_session_meta()
 
     def _stop(self) -> None:
         if self._worker:
@@ -809,6 +1219,7 @@ class BatchWindow(QMainWindow):
             self._stop()
 
         self._save_current_state()
+        self._session.save_session_meta()
         self._clear_instance_state()
         self.closed.emit()
         super().closeEvent(event)

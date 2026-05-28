@@ -173,6 +173,28 @@ class SyncedImageView(QGraphicsView):
     def _current_zoom(self) -> float:
         return self.transform().m11()
 
+    # ── État de zoom (interface commune avec MaskCanvas / WBPickerCanvas) ────
+
+    def get_zoom_state(self) -> tuple:
+        """Retourne (zoom_ratio, cx_rel, cy_rel) normalisés pour la synchronisation."""
+        if self._pix_item is None:
+            return (1.0, 0.5, 0.5)
+        fz = self._fit_zoom()
+        if fz <= 0:
+            return (1.0, 0.5, 0.5)
+        sc = self.mapToScene(self.viewport().rect().center())
+        iw = self._pix_item.pixmap().width()
+        ih = self._pix_item.pixmap().height()
+        return (
+            self._current_zoom() / fz,
+            sc.x() / iw if iw > 0 else 0.5,
+            sc.y() / ih if ih > 0 else 0.5,
+        )
+
+    def apply_zoom_state(self, zoom_ratio: float, cx_rel: float, cy_rel: float) -> None:
+        """Applique un état de vue normalisé (reçu de l'onglet précédent)."""
+        self._apply_sync(zoom_ratio, cx_rel, cy_rel)
+
     # ── Synchronisation ──────────────────────────────────────────────────────
 
     def _broadcast(self):

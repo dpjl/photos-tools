@@ -74,6 +74,10 @@ class WBPickerCanvas(QWidget):
         # Curseur
         self._cursor_canvas: QPoint | None = None
 
+        # Undo/redo pour le point de balance
+        self._pick_undo_stack: list = []  # list of pick_pt (ou None)
+        self._pick_redo_stack: list = []
+
         # Zoom / pan
         self._zoom:     float          = 1.0
         self._pan_x:    float          = 0.0
@@ -92,6 +96,49 @@ class WBPickerCanvas(QWidget):
 
     def clear_pick_point(self) -> None:
         self._pick_pt = None
+        self.update()
+
+    def undo(self) -> None:
+        """Annule le dernier choix de point blanc."""
+        if self._pick_undo_stack:
+            self._pick_redo_stack.append(self._pick_pt)
+            self._pick_pt = self._pick_undo_stack.pop()
+            if self._pick_pt is not None:
+                self.pick_changed.emit(*self._pick_pt)
+            self.update()
+
+    def redo(self) -> None:
+        """Rétablit le dernier choix de point blanc annulé."""
+        if self._pick_redo_stack:
+            self._pick_undo_stack.append(self._pick_pt)
+            self._pick_pt = self._pick_redo_stack.pop()
+            if self._pick_pt is not None:
+                self.pick_changed.emit(*self._pick_pt)
+            self.update()
+
+    def get_zoom_state(self) -> tuple:
+        """Retourne (zoom_ratio, cx_rel, cy_rel) normalisés — interface commune."""
+        cw, ch = self.width(), self.height()
+        if cw == 0 or ch == 0 or self._img_w == 0 or self._img_h == 0:
+            return (1.0, 0.5, 0.5)
+        fit  = min(cw / self._img_w, ch / self._img_h)
+        dw   = self._img_w * fit * self._zoom
+        dh   = self._img_h * fit * self._zoom
+        cx_rel = 0.5 - self._pan_x / dw if dw else 0.5
+        cy_rel = 0.5 - self._pan_y / dh if dh else 0.5
+        return (self._zoom, cx_rel, cy_rel)
+
+    def apply_zoom_state(self, zoom_ratio: float, cx_rel: float, cy_rel: float) -> None:
+        """Applique un état de vue normalisé (reçu de l'onglet précédent)."""
+        self._zoom = max(0.5, min(16.0, zoom_ratio))
+        cw, ch = self.width(), self.height()
+        if cw == 0 or ch == 0 or self._img_w == 0 or self._img_h == 0:
+            return
+        fit  = min(cw / self._img_w, ch / self._img_h)
+        dw   = self._img_w * fit * self._zoom
+        dh   = self._img_h * fit * self._zoom
+        self._pan_x = (0.5 - cx_rel) * dw
+        self._pan_y = (0.5 - cy_rel) * dh
         self.update()
 
     def set_display_image(self, bgr: np.ndarray) -> None:
@@ -120,6 +167,8 @@ class WBPickerCanvas(QWidget):
         self._disp_pixmap = self._make_rgb_pixmap(rgb)
         self._pick_pt = initial_pick
         self._cursor_canvas = None
+        self._pick_undo_stack.clear()
+        self._pick_redo_stack.clear()
         self._zoom    = 1.0
         self._pan_x   = 0.0
         self._pan_y   = 0.0
@@ -182,6 +231,7 @@ class WBPickerCanvas(QWidget):
     # ── Evenements ───────────────────────────────────────────────────────────
 
     def mousePressEvent(self, event):
+        ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
         if event.button() == Qt.MouseButton.MiddleButton:
             self._panning  = True
             self._pan_last = event.position().toPoint()
@@ -189,11 +239,21 @@ class WBPickerCanvas(QWidget):
             event.accept()
             return
         if event.button() == Qt.MouseButton.LeftButton:
-            coords = self._canvas_to_img(event.position().toPoint())
-            if coords:
-                self._pick_pt = coords
-                self.pick_changed.emit(*coords)
-                self.update()
+            if ctrl:
+                # Ctrl+clic gauche → sélectionner le point blanc
+                coords = self._canvas_to_img(event.position().toPoint())
+                if coords:
+                    # Sauvegarder pour undo avant de changer
+                    self._pick_undo_stack.append(self._pick_pt)
+                    self._pick_redo_stack.clear()
+                    self._pick_pt = coords
+                    self.pick_changed.emit(*coords)
+                    self.update()
+            else:
+                # Clic gauche simple → déplacement
+                self._panning  = True
+                self._pan_last = event.position().toPoint()
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
 
     def mouseMoveEvent(self, event):
         pos = event.position().toPoint()
@@ -211,10 +271,11 @@ class WBPickerCanvas(QWidget):
         self.update()
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.MiddleButton:
-            self._panning  = False
-            self._pan_last = None
-            self.setCursor(Qt.CursorShape.CrossCursor)
+        if event.button() in (Qt.MouseButton.MiddleButton, Qt.MouseButton.LeftButton):
+            if self._panning:
+                self._panning  = False
+                self._pan_last = None
+                self.setCursor(Qt.CursorShape.CrossCursor)
             event.accept()
 
     def wheelEvent(self, event):

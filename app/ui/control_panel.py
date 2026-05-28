@@ -14,20 +14,23 @@ from ui.step_panel import StepListWidget
 class ControlPanel(QWidget):
     """Panneau gauche : bouton Run + liste des étapes paramétrables."""
 
-    run_requested        = pyqtSignal()
-    stop_requested       = pyqtSignal()
-    order_changed        = pyqtSignal(list)          # list[str]
-    param_changed        = pyqtSignal(str, str, object)
-    enabled_changed      = pyqtSignal(str, bool)
-    rerun_requested      = pyqtSignal(str)           # step_id
-    overlay_toggled      = pyqtSignal(str, bool)     # (step_id, enabled) — sans recalcul
-    mask_edit_requested  = pyqtSignal(str)           # step_id — ouvrir l'éditeur de masque
-    color_picker_requested = pyqtSignal(str)         # step_id — ouvrir la pipette WB
+    run_requested               = pyqtSignal()
+    stop_requested              = pyqtSignal()
+    order_changed               = pyqtSignal(list)
+    order_reordered             = pyqtSignal(list, list)      # (old_order, new_order)
+    param_changed               = pyqtSignal(str, str, object)
+    param_propagate_requested   = pyqtSignal(str, str, object)
+    enabled_changed             = pyqtSignal(str, bool)
+    enabled_propagate_requested = pyqtSignal(str, bool)
+    rerun_requested             = pyqtSignal(str)
+    overlay_toggled             = pyqtSignal(str, bool)
+    mask_edit_requested         = pyqtSignal(str)
+    color_picker_requested      = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumWidth(300)
-        self.setMaximumWidth(380)
+        self.setMinimumWidth(260)
+        self.setMaximumWidth(340)
         self.setStyleSheet("background: #16162a;")
 
         root = QVBoxLayout(self)
@@ -78,8 +81,11 @@ class ControlPanel(QWidget):
 
         self.step_list = StepListWidget()
         self.step_list.order_changed.connect(self.order_changed)
+        self.step_list.order_reordered.connect(self.order_reordered)
         self.step_list.param_changed.connect(self.param_changed)
+        self.step_list.param_propagate_requested.connect(self.param_propagate_requested)
         self.step_list.enabled_changed.connect(self.enabled_changed)
+        self.step_list.enabled_propagate_requested.connect(self.enabled_propagate_requested)
         self.step_list.rerun_requested.connect(self.rerun_requested)
         self.step_list.overlay_toggled.connect(self.overlay_toggled)
         self.step_list.mask_edit_requested.connect(self.mask_edit_requested)

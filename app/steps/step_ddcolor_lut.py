@@ -33,13 +33,13 @@ class DDColorLUTStep(StepBase):
     previewable = True
 
     param_defs = [
-        {"key": "taille_ia", "label": "Resolution IA", "type": "choice",
-         "default": "512", "choices": ["384", "512", "768"]},
-        {"key": "force", "label": "Force finale", "type": "float",
+        {"key": "taille_ia", "label": "Résolution IA", "type": "choice",
+         "as_buttons": True, "default": "512", "choices": ["384", "512", "768"]},
+        {"key": "force", "label": "Force", "type": "float",
          "default": 1.0, "min": 0.0, "max": 1.25, "step": 0.05},
-        {"key": "influence_ia", "label": "Influence DDColor", "type": "float",
+        {"key": "influence_ia", "label": "Influence IA", "type": "float",
          "default": 1.0, "min": 0.4, "max": 1.4, "step": 0.05},
-        {"key": "vibrance", "label": "Vibrance finale", "type": "float",
+        {"key": "vibrance", "label": "Vibrance", "type": "float",
          "default": 0.16, "min": 0.0, "max": 0.35, "step": 0.02},
     ]
 

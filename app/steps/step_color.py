@@ -17,15 +17,15 @@ class ColorStep(StepBase):
     previewable        = True    # aperçu instantané à chaque changement de param
 
     param_defs = [
-        {"key": "low_pct",    "label": "Pct. bas histogramme",  "type": "float",
+        {"key": "low_pct",    "label": "Seuil bas",       "type": "float",
          "default": 1.0,  "min": 0.0,  "max": 5.0,   "step": 0.1},
-        {"key": "high_pct",   "label": "Pct. haut histogramme", "type": "float",
+        {"key": "high_pct",   "label": "Seuil haut",      "type": "float",
          "default": 99.0, "min": 94.0, "max": 100.0, "step": 0.1},
-        {"key": "roi_inset",  "label": "Marge ROI (fraction)",  "type": "float",
+        {"key": "roi_inset",  "label": "Marge ROI",       "type": "float",
          "default": 0.06, "min": 0.0,  "max": 0.2,   "step": 0.01},
-        {"key": "clip_limit", "label": "CLAHE — contraste",     "type": "float",
+        {"key": "clip_limit", "label": "Contraste CLAHE", "type": "float",
          "default": 2.5,  "min": 0.5,  "max": 10.0,  "step": 0.1},
-        {"key": "sat_factor", "label": "Saturation (×)",        "type": "float",
+        {"key": "sat_factor", "label": "Saturation ×",    "type": "float",
          "default": 1.35, "min": 0.5,  "max": 2.5,   "step": 0.05},
     ]
 

@@ -44,17 +44,17 @@ class LightLeakStep(StepBase):
     enabled_by_default = False           # désactivée par défaut
 
     param_defs = [
-        {"key": "strength",  "label": "Force",                         "type": "float",
+        {"key": "strength",  "label": "Force",             "type": "float",
          "default": 1.0,  "min": 0.0,  "max": 1.0,  "step": 0.05},
-        {"key": "hue_range", "label": "Amplitude teinte chaude (°)",   "type": "int",
+        {"key": "hue_range", "label": "Amplitude teinte",  "type": "int",
          "default": 25,   "min": 5,    "max": 50,   "step": 1},
-        {"key": "sat_min",   "label": "Saturation min. détection",     "type": "float",
+        {"key": "sat_min",   "label": "Sat. min.",          "type": "float",
          "default": 0.38, "min": 0.10, "max": 0.70, "step": 0.02},
-        {"key": "dilation",  "label": "Dilatation masque spots (px)",  "type": "int",
+        {"key": "dilation",  "label": "Dilatation",         "type": "int",
          "default": 30,   "min": 0,    "max": 80,   "step": 5},
-        {"key": "feather",   "label": "Feathering σ (px)",             "type": "int",
+        {"key": "feather",   "label": "Feathering σ",        "type": "int",
          "default": 30,   "min": 5,    "max": 80,   "step": 5},
-        {"key": "bg_only",   "label": "Fond seulement (rembg)",        "type": "bool",
+        {"key": "bg_only",   "label": "Fond seulement",     "type": "bool",
          "default": True},
     ]
 

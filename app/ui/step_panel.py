@@ -48,7 +48,9 @@ class DragHandle(QLabel):
         if event.button() == Qt.MouseButton.LeftButton:
             self._pressing = True
             self._press_pos = event.globalPosition().toPoint()
-        super().mousePressEvent(event)
+            event.accept()  # consomme l'événement → n'ouvre pas le panneau
+        else:
+            super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
         if self._pressing and self._press_pos is not None:
@@ -91,13 +93,15 @@ _STATE_LABELS = {
 class StepPanel(QWidget):
     """Panneau d'une étape : en-tête + corps pliable."""
 
-    enabled_changed     = pyqtSignal(str, bool)         # (step_id, enabled)
-    param_changed       = pyqtSignal(str, str, object)  # (step_id, key, value)
-    rerun_requested     = pyqtSignal(str)               # step_id
-    drag_requested      = pyqtSignal(str)               # step_id — relayé depuis DragHandle
-    overlay_toggled     = pyqtSignal(str, bool)          # (step_id, enabled) — sans recalcul
-    mask_edit_requested = pyqtSignal(str)               # step_id — ouvrir l'éditeur de masque
-    color_picker_requested = pyqtSignal(str)            # step_id — ouvrir la pipette WB
+    enabled_changed           = pyqtSignal(str, bool)         # (step_id, enabled)
+    enabled_propagate_requested = pyqtSignal(str, bool)       # (step_id, enabled) — batch
+    param_changed             = pyqtSignal(str, str, object)  # (step_id, key, value)
+    param_propagate_requested = pyqtSignal(str, str, object)  # (step_id, key, val) — batch
+    rerun_requested         = pyqtSignal(str)               # step_id
+    drag_requested          = pyqtSignal(str)               # step_id — relayé depuis DragHandle
+    overlay_toggled         = pyqtSignal(str, bool)          # (step_id, enabled) — sans recalcul
+    mask_edit_requested     = pyqtSignal(str)               # step_id — ouvrir l'éditeur de masque
+    color_picker_requested  = pyqtSignal(str)               # step_id — ouvrir la pipette WB
 
     def __init__(self, step, parent=None):
         super().__init__(parent)
@@ -141,11 +145,41 @@ class StepPanel(QWidget):
         # Checkbox activer/désactiver
         self._enable_cb = QCheckBox()
         self._enable_cb.setChecked(getattr(self._step, "enabled_by_default", True))
-        self._enable_cb.setStyleSheet("margin-right: 4px;")
+        self._enable_cb.setStyleSheet("""
+            QCheckBox { margin: 0 4px; }
+            QCheckBox::indicator {
+                width: 16px; height: 16px;
+                border: 2px solid #555; border-radius: 3px;
+                background: #252535;
+            }
+            QCheckBox::indicator:checked {
+                background: #2a6496; border-color: #3a84b6;
+            }
+            QCheckBox::indicator:hover { border-color: #aaa; }
+        """)
         self._enable_cb.toggled.connect(
             lambda v: self.enabled_changed.emit(self._step.id, v)
         )
         hdr_layout.addWidget(self._enable_cb)
+
+        # Bouton propagation de l'état activé (mode batch uniquement, caché par défaut)
+        self._enabled_propagate_btn = QPushButton("⬇")
+        self._enabled_propagate_btn.setFixedHeight(16)
+        self._enabled_propagate_btn.setMaximumWidth(0)  # invisible par défaut
+        self._enabled_propagate_btn.setStyleSheet(
+            "QPushButton { background: #1e3050; color: #7ab; border-radius: 3px;"
+            "  border: 1px solid #2a4060; font-size: 9px; padding: 0; }"
+            "QPushButton:hover { background: #2a4470; color: #adf; }"
+        )
+        self._enabled_propagate_btn.setToolTip(
+            "Propager l'état activé/désactivé aux images sélectionnées"
+        )
+        self._enabled_propagate_btn.clicked.connect(
+            lambda: self.enabled_propagate_requested.emit(
+                self._step.id, self._enable_cb.isChecked()
+            )
+        )
+        hdr_layout.addWidget(self._enabled_propagate_btn)
 
         # Flèche expand/collapse
         self._arrow = QLabel("▶")
@@ -163,7 +197,7 @@ class StepPanel(QWidget):
         self._status_lbl.setStyleSheet("color: #888; font-size: 10px;")
         hdr_layout.addWidget(self._status_lbl)
 
-        self._header.mousePressEvent = lambda e: self._toggle()
+        self._header.mousePressEvent = self._on_header_click
         root.addWidget(self._header)
 
         # ── Corps (paramètres) ───────────────────────────────────────────────
@@ -175,6 +209,10 @@ class StepPanel(QWidget):
         for pdef in self._step.param_defs:
             row = ParamRow(pdef)
             row.value_changed.connect(self._on_param_row_changed)
+            row.propagate_requested.connect(
+                lambda k, v, sid=self._step.id:
+                    self.param_propagate_requested.emit(sid, k, v)
+            )
             self._param_rows[pdef["key"]] = row
             body_layout.addWidget(row)
 
@@ -279,6 +317,18 @@ class StepPanel(QWidget):
             if k in self._param_rows:
                 self._param_rows[k].set_value(v)
 
+    def set_propagate_visible(self, visible: bool) -> None:
+        """Active ou désactive les boutons ⬇ de propagation sur chaque ligne et le header."""
+        for row in self._param_rows.values():
+            row.set_propagate_visible(visible)
+        # Bouton header : propagation de l'état activé
+        if visible:
+            self._enabled_propagate_btn.setMaximumWidth(20)
+            self._enabled_propagate_btn.setVisible(True)
+        else:
+            self._enabled_propagate_btn.setMaximumWidth(0)
+            self._enabled_propagate_btn.setVisible(False)
+
     def set_state(self, state: str, message: str = ""):
         self._state = state
         self._apply_state(state, message)
@@ -325,13 +375,12 @@ class StepPanel(QWidget):
                 return
 
         # Comportement par défaut : valeurs initiales de param_defs
+        # On émet param_changed pour chaque param afin que l'undo les capte tous.
         for pdef in self._step.param_defs:
             row = self._param_rows.get(pdef["key"])
             if row is not None:
                 row.set_value(pdef["default"])
-        if self._step.param_defs:
-            first = self._step.param_defs[0]
-            self.param_changed.emit(self._step.id, first["key"], first["default"])
+                self.param_changed.emit(self._step.id, pdef["key"], pdef["default"])
 
     # ── Interne ──────────────────────────────────────────────────────────────
 
@@ -358,6 +407,20 @@ class StepPanel(QWidget):
         self._body.setVisible(self._expanded)
         self._arrow.setText("▼" if self._expanded else "▶")
 
+    def _on_header_click(self, event) -> None:
+        """Ouvre/ferme les paramètres seulement si le clic est à droite du bloc gauche
+        (drag_handle + checkbox + btn_propagate). La zone checkbox consomme le clic
+        elle-même ; on calcule une garde de 8 px au-delà."""
+        # Calculer la limite droite de la zone réservée
+        guard_x = (
+            self._enable_cb.x()
+            + self._enable_cb.width()
+            + self._enabled_propagate_btn.width()
+            + 8
+        )
+        if event.position().x() > guard_x:
+            self._toggle()
+
     def _apply_state(self, state: str, message: str = ""):
         color = _STATE_COLORS.get(state, "#444")
         self._accent_bar.setStyleSheet(f"background: {color}; border-radius: 2px;")
@@ -378,13 +441,16 @@ class StepPanel(QWidget):
 class StepListWidget(QWidget):
     """Conteneur des StepPanels avec réordonnancement par drag-and-drop."""
 
-    order_changed        = pyqtSignal(list)           # list[str] nouvel ordre des step_ids
-    param_changed        = pyqtSignal(str, str, object)
-    enabled_changed      = pyqtSignal(str, bool)
-    rerun_requested      = pyqtSignal(str)
-    overlay_toggled      = pyqtSignal(str, bool)      # relayé depuis les panneaux
-    mask_edit_requested  = pyqtSignal(str)            # relayé depuis les panneaux
-    color_picker_requested = pyqtSignal(str)          # relayé depuis les panneaux
+    order_changed               = pyqtSignal(list)           # list[str] nouvel ordre
+    order_reordered             = pyqtSignal(list, list)      # (old_order, new_order)
+    param_changed               = pyqtSignal(str, str, object)
+    param_propagate_requested   = pyqtSignal(str, str, object)
+    enabled_changed             = pyqtSignal(str, bool)
+    enabled_propagate_requested = pyqtSignal(str, bool)
+    rerun_requested             = pyqtSignal(str)
+    overlay_toggled             = pyqtSignal(str, bool)
+    mask_edit_requested         = pyqtSignal(str)
+    color_picker_requested      = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -397,8 +463,9 @@ class StepListWidget(QWidget):
         self._vbox.addStretch()
 
         # Drag state
-        self._dragging:    Optional[str]   = None
-        self._drag_insert: int             = 0
+        self._dragging:       Optional[str]  = None
+        self._drag_insert:    int            = 0
+        self._drag_old_order: list           = []  # snapshot avant drag
 
         # Indicateur d'insertion
         self._insert_line = QFrame(self)
@@ -414,7 +481,9 @@ class StepListWidget(QWidget):
             panel = StepPanel(step)
             panel.drag_requested.connect(self._start_drag)
             panel.param_changed.connect(self.param_changed)
+            panel.param_propagate_requested.connect(self.param_propagate_requested)
             panel.enabled_changed.connect(self.enabled_changed)
+            panel.enabled_propagate_requested.connect(self.enabled_propagate_requested)
             panel.rerun_requested.connect(self.rerun_requested)
             panel.overlay_toggled.connect(self.overlay_toggled)
             panel.mask_edit_requested.connect(self.mask_edit_requested)
@@ -422,6 +491,11 @@ class StepListWidget(QWidget):
             self._panels[step.id] = panel
             self._order.append(step.id)
             self._vbox.insertWidget(len(self._order) - 1, panel)
+
+    def set_batch_mode(self, enabled: bool) -> None:
+        """Active ou désactive les boutons de propagation ⬇ sur tous les panneaux."""
+        for panel in self._panels.values():
+            panel.set_propagate_visible(enabled)
 
     def get_panel(self, step_id: str) -> Optional[StepPanel]:
         return self._panels.get(step_id)
@@ -459,8 +533,9 @@ class StepListWidget(QWidget):
     # ── Drag ────────────────────────────────────────────────────────────────
 
     def _start_drag(self, step_id: str):
-        self._dragging    = step_id
-        self._drag_insert = self._order.index(step_id)
+        self._dragging      = step_id
+        self._drag_insert   = self._order.index(step_id)
+        self._drag_old_order = list(self._order)  # snapshot avant déplacement
         self.grabMouse()
         self._panels[step_id].setStyleSheet(
             "QWidget#StepPanel { background: #14141e; opacity: 0.6; }"
@@ -513,6 +588,7 @@ class StepListWidget(QWidget):
             self._order.insert(new_idx, step_id)
             self._rebuild_layout()
             self.order_changed.emit(list(self._order))
+            self.order_reordered.emit(self._drag_old_order, list(self._order))
 
     def _rebuild_layout(self):
         for panel in self._panels.values():

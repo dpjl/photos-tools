@@ -11,8 +11,8 @@ from PyQt6.QtWidgets import (
     QSplitter, QLabel, QFileDialog, QStatusBar, QPushButton,
     QSizePolicy,
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSlot
-from PyQt6.QtGui import QKeySequence, QShortcut, QAction
+from PyQt6.QtCore import Qt, QTimer, pyqtSlot, QSettings
+from PyQt6.QtGui import QKeySequence, QShortcut, QAction, QUndoStack
 
 from core.history import HistoryManager, HistoryEntry
 from core.pipeline import PipelineWorker
@@ -22,6 +22,7 @@ from ui.step_panel import StepListWidget
 from ui.thumbnail_strip import ThumbnailStrip
 from ui.history_panel import HistoryPanel
 from ui.control_panel import ControlPanel
+from ui.param_history import SetParamCommand, MoveStepCommand, ToggleStepCommand
 
 
 # Étapes dont un changement de paramètre déclenche le mini-pipeline de preview rapide
@@ -53,6 +54,21 @@ class MainApp(QMainWindow):
 
         # Fenêtre batch (une seule instance à la fois)
         self._batch_window = None
+
+        # Flag pour éviter de push une 2ème commande lors du redo/undo d'un réordre
+        self._applying_order = False
+        # Flag pour éviter de push lors du redo/undo d'activation
+        self._applying_enabled = False
+
+        # Undo/Redo — pile de commandes paramétriques
+        self._undo_stack = QUndoStack(self)
+        # Snapshot des valeurs courantes des paramètres (pour capturer old_val)
+        self._params_snapshot: dict[str, dict] = {
+            s.id: dict(s.default_params()) for s in ALL_STEPS
+        }
+        # Buffer pour regrouper les changements de preset en une seule commande macro
+        self._preset_buf: list = []
+        self._preset_flush_pending = False
 
         # ── Preview instantané (étapes rapides) ──────────────────────────────
         self._preview_timer = QTimer(self)
@@ -163,7 +179,7 @@ class MainApp(QMainWindow):
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([320, 1080])
+        splitter.setSizes([340, 1060])
 
         main_layout.addWidget(splitter, stretch=1)
 
@@ -195,6 +211,9 @@ class MainApp(QMainWindow):
         self._batch_act.triggered.connect(self._on_batch_requested)
         file_menu.addAction(self._batch_act)
 
+        self._recent_menu = file_menu.addMenu("📋  Récents")
+        self._rebuild_recent_menu()
+
         file_menu.addSeparator()
         quit_act = QAction("Quitter", self)
         quit_act.setShortcut(QKeySequence("Ctrl+Q"))
@@ -204,6 +223,8 @@ class MainApp(QMainWindow):
     def _setup_shortcuts(self):
         QShortcut(QKeySequence("Ctrl+R"), self, self._run_pipeline)
         QShortcut(QKeySequence("F"), self, self._fit_views)
+        QShortcut(QKeySequence("Ctrl+Z"), self, self._undo_stack.undo)
+        QShortcut(QKeySequence("Ctrl+Y"), self, self._undo_stack.redo)
 
     # ══════════════════════════════════════════════════════════════════════════
     # Image
@@ -240,6 +261,10 @@ class MainApp(QMainWindow):
         self._last_step_images.clear()
         self._active_run_id = None
         self._history_panel.clear()  # supprime tous les chips de l'image précédente
+
+        # Vider la pile undo et resynchroniser le snapshot
+        self._undo_stack.clear()
+        self._params_snapshot = self._ctrl.step_list.get_all_params()
 
         # Réinitialiser l'overlay si actif
         self._overlay_step = None
@@ -285,13 +310,30 @@ class MainApp(QMainWindow):
         )
         if not folder:
             return
+        self._open_batch_folder(folder)
+
+    def _open_batch_folder(self, folder: str) -> None:
+        """Ouvre un batch depuis un dossier donné (partagé par menu et récents)."""
+        from core.batch import BatchSession, BatchImageConfig
+        from ui.batch_window import BatchWindow
+
+        if self._batch_window is not None:
+            self._batch_window.raise_()
+            self._batch_window.activateWindow()
+            return
+
+        if not os.path.isdir(folder):
+            self._status_bar.showMessage(f"Dossier introuvable : {folder}")
+            return
+
+        self._add_recent_batch(folder)
 
         # Snapshot de la config courante
         defaults = BatchImageConfig(
-            file_path       = "",
-            step_order      = list(self._ctrl.step_list.get_order()),
-            step_enabled    = dict(self._ctrl.step_list.get_enabled()),
-            step_params     = {
+            file_path    = "",
+            step_order   = list(self._ctrl.step_list.get_order()),
+            step_enabled = dict(self._ctrl.step_list.get_enabled()),
+            step_params  = {
                 k: dict(v)
                 for k, v in self._ctrl.step_list.get_all_params().items()
             },
@@ -306,8 +348,38 @@ class MainApp(QMainWindow):
 
         self._batch_window = BatchWindow(self, session)
         self._batch_window.closed.connect(self._on_batch_closed)
-        self._ctrl.set_running(True)   # désactive le bouton Lancer principal
+        self._ctrl.set_running(True)
         self._batch_window.show()
+
+    def _add_recent_batch(self, path: str) -> None:
+        """Préfixe path dans la liste des batchs récents (max 8)."""
+        s = QSettings("PlusTekPhoto", "RestaurationPhoto")
+        recents: list = s.value("recent_batches", [], type=list)
+        recents = [p for p in recents if p != path]
+        recents.insert(0, path)
+        s.setValue("recent_batches", recents[:8])
+        self._rebuild_recent_menu()
+
+    def _rebuild_recent_menu(self) -> None:
+        self._recent_menu.clear()
+        s = QSettings("PlusTekPhoto", "RestaurationPhoto")
+        recents: list = s.value("recent_batches", [], type=list)
+        for path in recents:
+            folder_name = os.path.basename(path.rstrip("/\\")) or path
+            act = QAction(folder_name, self)
+            act.setToolTip(path)
+            act.triggered.connect(lambda checked=False, p=path: self._open_batch_folder(p))
+            self._recent_menu.addAction(act)
+        if recents:
+            self._recent_menu.addSeparator()
+            clear_act = QAction("Effacer les récents", self)
+            clear_act.triggered.connect(self._clear_recent_batches)
+            self._recent_menu.addAction(clear_act)
+        self._recent_menu.setEnabled(bool(recents))
+
+    def _clear_recent_batches(self) -> None:
+        QSettings("PlusTekPhoto", "RestaurationPhoto").remove("recent_batches")
+        self._rebuild_recent_menu()
 
     def _on_batch_closed(self) -> None:
         self._batch_window = None
@@ -471,6 +543,9 @@ class MainApp(QMainWindow):
             panel.set_state("ok")
             if "effective_params" in extras:
                 panel.set_params(extras["effective_params"])
+                # Synchroniser le snapshot avec les valeurs effectives du run
+                for k, v in extras["effective_params"].items():
+                    self._params_snapshot.setdefault(step_id, {})[k] = v
         self._thumb_strip.update_image(step_id, img)
         # Mise à jour en direct de la vue A si elle cible cette étape
         if self._view_a[1] == step_id:
@@ -503,6 +578,8 @@ class MainApp(QMainWindow):
         self._status_bar.showMessage(
             f"Run #{entry.run_id} terminé — {len(entry.completed_steps)} étape(s)"
         )
+        # Resynchroniser le snapshot complet après le run (effective_params éventuels)
+        self._params_snapshot = self._ctrl.step_list.get_all_params()
 
     # ══════════════════════════════════════════════════════════════════════════
     # Overlay détections (actif sans recalcul du pipeline)
@@ -735,12 +812,81 @@ class MainApp(QMainWindow):
     # ══════════════════════════════════════════════════════════════════════════
 
     def _on_order_changed(self, new_order: list[str]):
-        self._step_order = new_order
+        if not self._applying_order:
+            self._step_order = new_order
         self._mark_stale_from(new_order[0] if new_order else None)
 
+    def _on_order_reordered(self, old_order: list[str], new_order: list[str]) -> None:
+        """Push une commande undo pour le réordonnancement par drag-and-drop."""
+        if self._applying_order:
+            return
+        def apply(order: list) -> None:
+            self._applying_order = True
+            self._ctrl.step_list.set_order(order)
+            self._step_order = order
+            self._mark_stale_from(order[0] if order else None)
+            self._applying_order = False
+        cmd = MoveStepCommand(
+            step_id   = new_order[0] if new_order else "",
+            old_order = old_order,
+            new_order = new_order,
+            apply_fn  = apply,
+        )
+        self._undo_stack.push(cmd)
+
     def _on_param_changed(self, step_id: str, key: str, value):
+        """Capture old_val, met à jour le snapshot, enregistre la commande undo."""
+        # Capturer l'ancienne valeur AVANT de mettre à jour le snapshot
+        old_val = self._params_snapshot.get(step_id, {}).get(key)
+        # Mettre à jour le snapshot
+        self._params_snapshot.setdefault(step_id, {})[key] = value
+
+        # Détecter si on est dans un chargement de preset (macro undo)
+        panel = self._ctrl.step_list.get_panel(step_id)
+        is_preset = panel is not None and panel.is_loading_preset()
+
+        if is_preset:
+            # Bufferer pour créer une macro via QTimer.singleShot(0)
+            self._preset_buf.append((step_id, key, old_val, value))
+            if not self._preset_flush_pending:
+                self._preset_flush_pending = True
+                from PyQt6.QtCore import QTimer as _QTimer
+                _QTimer.singleShot(0, self._flush_preset_undo)
+        else:
+            # Vider un éventuel buffer résiduel (ne devrait pas arriver)
+            if self._preset_buf:
+                self._flush_preset_undo()
+            cmd = SetParamCommand(
+                self._apply_param_silent, step_id, key, old_val, value
+            )
+            self._undo_stack.push(cmd)
+
         self._mark_stale_from(step_id)
         self._schedule_preview(step_id)
+
+    def _apply_param_silent(self, step_id: str, key: str, val) -> None:
+        """Applique val dans le widget (sans émettre de signal) et met à jour le snapshot."""
+        panel = self._ctrl.step_list.get_panel(step_id)
+        if panel is None:
+            return
+        row = panel._param_rows.get(key)
+        if row is not None:
+            row.set_value(val)  # _block=True, pas de signal
+        self._params_snapshot.setdefault(step_id, {})[key] = val
+        self._schedule_preview(step_id)
+
+    def _flush_preset_undo(self) -> None:
+        """Vide le buffer preset et pousse une macro undo regroupant tous les changements."""
+        self._preset_flush_pending = False
+        buf = self._preset_buf
+        self._preset_buf = []
+        if not buf:
+            return
+        self._undo_stack.beginMacro("Changer profil")
+        for sid, key, old, new in buf:
+            cmd = SetParamCommand(self._apply_param_silent, sid, key, old, new)
+            self._undo_stack.push(cmd)  # redo() immédiat → no-op (_first=True)
+        self._undo_stack.endMacro()
 
     # ══════════════════════════════════════════════════════════════════════════
     # Preview instantané (étapes rapides)
@@ -864,13 +1010,33 @@ class MainApp(QMainWindow):
         return self._original
 
     def _on_enabled_changed(self, step_id: str, enabled: bool):
+        if self._applying_enabled:
+            return
+        old_val = self._step_enabled.get(step_id)
         self._step_enabled[step_id] = enabled
         panel = self._ctrl.step_list.get_panel(step_id)
         if panel:
             panel.set_state("disabled" if not enabled else "stale")
-        # Rafraîchir le preview si l'étape appartient au groupe rapide
         if step_id in _FAST_PREVIEW_IDS:
             self._schedule_preview(step_id)
+        # Pousser la commande undo
+        if old_val is not None and old_val != enabled:
+            cmd = ToggleStepCommand(
+                self._apply_enabled_silent, step_id, old_val, enabled
+            )
+            self._undo_stack.push(cmd)
+
+    def _apply_enabled_silent(self, step_id: str, val: bool) -> None:
+        """Applique l'état activé sans émettre de commande undo."""
+        self._applying_enabled = True
+        self._step_enabled[step_id] = val
+        panel = self._ctrl.step_list.get_panel(step_id)
+        if panel:
+            panel._enable_cb.blockSignals(True)
+            panel._enable_cb.setChecked(val)
+            panel._enable_cb.blockSignals(False)
+            panel.set_state("disabled" if not val else "stale")
+        self._applying_enabled = False
 
     def _mark_stale_from(self, step_id: Optional[str]):
         """Marque comme obsolètes toutes les étapes à partir de step_id."""

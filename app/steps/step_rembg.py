@@ -22,15 +22,15 @@ class RembgStep(StepBase):
     enabled_by_default = False
 
     param_defs = [
-        {"key": "strength_a", "label": "Force canal a* (rouge)",  "type": "float",
+        {"key": "strength_a", "label": "Force a* rouge", "type": "float",
          "default": 1.3, "min": 0.0, "max": 3.0, "step": 0.05},
-        {"key": "strength_b", "label": "Force canal b* (jaune)",  "type": "float",
+        {"key": "strength_b", "label": "Force b* jaune", "type": "float",
          "default": 0.4, "min": 0.0, "max": 2.0, "step": 0.05},
-        {"key": "sigma_fill", "label": "Diffusion σ (px)",        "type": "int",
+        {"key": "sigma_fill", "label": "Diffusion σ",     "type": "int",
          "default": 120, "min": 20, "max": 300, "step": 10},
-        {"key": "ref_x1",     "label": "Zone réf. début",         "type": "float",
+        {"key": "ref_x1",     "label": "Réf. début",     "type": "float",
          "default": 0.03, "min": 0.0, "max": 0.2, "step": 0.01},
-        {"key": "ref_x2",     "label": "Zone réf. fin",           "type": "float",
+        {"key": "ref_x2",     "label": "Réf. fin",        "type": "float",
          "default": 0.20, "min": 0.05, "max": 0.5, "step": 0.01},
     ]
 

@@ -32,7 +32,7 @@ class GFPGANStep(StepBase):
     slow       = True
 
     param_defs = [
-        {"key": "weight", "label": "Poids GFPGAN (0=source, 1=plein effet)", "type": "float",
+        {"key": "weight", "label": "Poids", "type": "float",
          "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05},
     ]
 

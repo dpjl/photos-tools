@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
     QSlider, QSizePolicy, QWidget, QFrame, QCheckBox,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QRect
-from PyQt6.QtGui import QImage, QPixmap, QPainter, QPen, QColor
+from PyQt6.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QKeySequence, QShortcut
 
 _MAX_UNDO = 20   # nombre maximum d'etats undo conserves en memoire
 
@@ -74,8 +74,9 @@ class MaskCanvas(QWidget):
         self._last_canvas_pt: QPoint | None    = None
         self._cursor_canvas:  QPoint | None    = None
 
-        # Historique undo
+        # Historique undo/redo
         self._undo_stack: list[np.ndarray] = []
+        self._redo_stack: list[np.ndarray] = []  # vidé à chaque nouveau trait
 
         # Zoom / pan
         self._zoom:     float          = 1.0
@@ -106,6 +107,7 @@ class MaskCanvas(QWidget):
         self._dirty           = True
         self._composite_cache = None
         self._undo_stack.clear()
+        self._redo_stack.clear()
         self._painting        = False
         self._erasing         = False
         self._last_canvas_pt  = None
@@ -136,8 +138,40 @@ class MaskCanvas(QWidget):
 
     def undo(self) -> None:
         if self._undo_stack:
+            self._redo_stack.append(self._mask.copy())
             self._mask = self._undo_stack.pop()
             self._invalidate()
+
+    def redo(self) -> None:
+        if self._redo_stack:
+            self._undo_stack.append(self._mask.copy())
+            self._mask = self._redo_stack.pop()
+            self._invalidate()
+
+    def get_zoom_state(self) -> tuple:
+        """Retourne (zoom_ratio, cx_rel, cy_rel) normalisés — interface commune."""
+        cw, ch = self.width(), self.height()
+        if cw == 0 or ch == 0 or self._img_w == 0 or self._img_h == 0:
+            return (1.0, 0.5, 0.5)
+        fit  = min(cw / self._img_w, ch / self._img_h)
+        dw   = self._img_w * fit * self._zoom
+        dh   = self._img_h * fit * self._zoom
+        cx_rel = 0.5 - self._pan_x / dw if dw else 0.5
+        cy_rel = 0.5 - self._pan_y / dh if dh else 0.5
+        return (self._zoom, cx_rel, cy_rel)
+
+    def apply_zoom_state(self, zoom_ratio: float, cx_rel: float, cy_rel: float) -> None:
+        """Applique un état de vue normalisé (reçu de l'onglet précédent)."""
+        self._zoom = max(0.5, min(16.0, zoom_ratio))
+        cw, ch = self.width(), self.height()
+        if cw == 0 or ch == 0 or self._img_w == 0 or self._img_h == 0:
+            return
+        fit  = min(cw / self._img_w, ch / self._img_h)
+        dw   = self._img_w * fit * self._zoom
+        dh   = self._img_h * fit * self._zoom
+        self._pan_x = (0.5 - cx_rel) * dw
+        self._pan_y = (0.5 - cy_rel) * dh
+        self.update()
 
     def set_brush_px(self, px: int) -> None:
         self._brush_px = max(1, min(300, px))
@@ -218,6 +252,7 @@ class MaskCanvas(QWidget):
         self._undo_stack.append(self._mask.copy())
         if len(self._undo_stack) > _MAX_UNDO:
             self._undo_stack.pop(0)
+        self._redo_stack.clear()  # nouveau trait → plus de redo disponible
 
     def _invalidate(self) -> None:
         self._dirty = True
@@ -226,29 +261,46 @@ class MaskCanvas(QWidget):
     # ── Evenements souris ─────────────────────────────────────────────────────
 
     def mousePressEvent(self, event):
-        pos = event.position().toPoint()
+        pos  = event.position().toPoint()
+        ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+
         if event.button() == Qt.MouseButton.MiddleButton:
             self._panning  = True
             self._pan_last = pos
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             event.accept()
             return
+
         if event.button() == Qt.MouseButton.LeftButton:
-            self._push_undo()
-            self._painting = True
-            self._erasing  = False
-        elif event.button() == Qt.MouseButton.RightButton:
-            self._push_undo()
-            self._erasing  = True
-            self._painting = False
-        else:
+            if ctrl:
+                # Ctrl+clic gauche → peindre
+                self._push_undo()
+                self._painting = True
+                self._erasing  = False
+                self._last_canvas_pt = pos
+                coords = self._canvas_to_img(pos)
+                if coords:
+                    cv2.circle(self._mask, coords, self._brush_px, 255, -1)
+                    self._invalidate()
+            else:
+                # Clic gauche simple → déplacement
+                self._panning  = True
+                self._pan_last = pos
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
             return
-        self._last_canvas_pt = pos
-        coords = self._canvas_to_img(pos)
-        if coords:
-            val = 0 if self._erasing else 255
-            cv2.circle(self._mask, coords, self._brush_px, val, -1)
-            self._invalidate()
+
+        if event.button() == Qt.MouseButton.RightButton:
+            if ctrl:
+                # Ctrl+clic droit → effacer
+                self._push_undo()
+                self._erasing  = True
+                self._painting = False
+                self._last_canvas_pt = pos
+                coords = self._canvas_to_img(pos)
+                if coords:
+                    cv2.circle(self._mask, coords, self._brush_px, 0, -1)
+                    self._invalidate()
+            # Clic droit sans Ctrl : ignoré
 
     def mouseMoveEvent(self, event):
         pos = event.position().toPoint()
@@ -267,12 +319,12 @@ class MaskCanvas(QWidget):
             self.update()  # reafficher juste le curseur
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.MiddleButton:
-            self._panning  = False
-            self._pan_last = None
-            self.setCursor(Qt.CursorShape.ArrowCursor)
+        if event.button() in (Qt.MouseButton.MiddleButton, Qt.MouseButton.LeftButton):
+            if self._panning:
+                self._panning  = False
+                self._pan_last = None
+                self.setCursor(Qt.CursorShape.ArrowCursor)
             event.accept()
-            return
         if event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
             self._painting       = False
             self._erasing        = False
@@ -294,11 +346,7 @@ class MaskCanvas(QWidget):
             self.update()
             self.brush_size_changed.emit(self._brush_px)
 
-    def keyPressEvent(self, event):
-        if event.key() == Qt.Key.Key_Z and (
-            event.modifiers() & Qt.KeyboardModifier.ControlModifier
-        ):
-            self.undo()
+    # keyPressEvent supprimé : Ctrl+Z route via le parent (MaskEditorDialog ou BatchWindow)
 
     # ── Rendu ─────────────────────────────────────────────────────────────────
 
@@ -409,10 +457,12 @@ class MaskCanvasPanel(QWidget):
         sl.addWidget(self._hline())
 
         tips = QLabel(
-            "Clic gauche  \u2192 peindre\n"
-            "Clic droit   \u2192 effacer\n"
-            "Molette      \u2192 taille pinceau\n"
-            "Ctrl+Z       \u2192 annuler"
+            "Ctrl + clic gauche  → peindre\n"
+            "Ctrl + clic droit   → effacer\n"
+            "Clic gauche         → déplacer\n"
+            "Molette             → taille pinceau\n"
+            "Ctrl+Molette        → zoom\n"
+            "Ctrl+Z / Ctrl+Y     → annuler/rétablir"
         )
         tips.setStyleSheet("color:#7a9ab0; font-size:10px; font-family:Consolas,monospace;")
         sl.addWidget(tips)
@@ -609,6 +659,10 @@ class MaskEditorDialog(QDialog):
         self._panel.accepted.connect(self.accept)
         self._panel.rejected.connect(self.reject)
         root.addWidget(self._panel)
+
+        # Ctrl+Z / Ctrl+Y pour ce dialogue (le keyPressEvent est dans MaskEditorDialog)
+        QShortcut(QKeySequence("Ctrl+Z"), self, self._panel._canvas.undo)
+        QShortcut(QKeySequence("Ctrl+Y"), self, self._panel._canvas.redo)
 
     def get_mask(self) -> np.ndarray:
         return self._panel.get_mask()
