@@ -97,6 +97,16 @@ class BatchWindow(QMainWindow):
         self._batch_run_start: float = 0.0 # timestamp début du run
         self._image_start_time: float = 0.0  # timestamp début de l'image courante
 
+        # État de visualisation d'un export
+        self._is_viewing_export:  bool          = False
+        self._viewed_export_path: Optional[str] = None
+        self._viewed_export_list: list[tuple[int, str]] = []
+
+        # Preview complet (worker dédié, indépendant du batch)
+        self._full_preview_worker: Optional[PipelineWorker] = None
+        self._preview_full_img:    Optional[np.ndarray]     = None
+        self._preview_overlay_step: Optional[str]           = None
+
         self._build_ui()
         self._apply_theme()
 
@@ -288,6 +298,7 @@ class BatchWindow(QMainWindow):
         self._step_list.order_reordered.connect(self._on_order_reordered)
         self._step_list.mask_edit_requested.connect(self._on_mask_edit_requested)
         self._step_list.color_picker_requested.connect(self._on_color_picker_requested)
+        self._step_list.overlay_toggled.connect(self._on_overlay_toggled)
         scroll.setWidget(self._step_list)
         scl.addWidget(scroll, stretch=1)
         splitter.addWidget(step_container)
@@ -324,18 +335,58 @@ class BatchWindow(QMainWindow):
         # Onglets d'aperçu image (zoom/pan via SyncedImageView)
         self._origin_view = SyncedImageView()
         self._dest_view   = SyncedImageView()
-        # Sync bidirectionnelle désactivée : gérée manuellement par _shared_zoom
-        # self._origin_view.add_peer(self._dest_view)
 
-        self._tabs.addTab(self._mask_panel,                               "Masque")    # 0
-        self._tabs.addTab(self._wb_panel,                                 "Blanc")     # 1
-        self._tabs.addTab(self._wrap_with_sidebar(self._origin_view, _SIDEBAR_W), "Originale")  # 2
-        self._tabs.addTab(self._wrap_with_sidebar(self._dest_view,   _SIDEBAR_W), "Résultat")   # 3
+        # ── Onglet Preview (index 0) ────────────────────────────────────────────────────────
+        self._preview_view = SyncedImageView()
+        # Sidebar du Preview
+        preview_sidebar = QWidget()
+        preview_sidebar.setFixedWidth(_SIDEBAR_W)
+        preview_sidebar.setStyleSheet("background:#16162a;")
+        ps_lay = QVBoxLayout(preview_sidebar)
+        ps_lay.setContentsMargins(8, 12, 8, 12)
+        ps_lay.setSpacing(10)
+
+        self._preview_status_lbl = QLabel("Preview rapide")
+        self._preview_status_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._preview_status_lbl.setWordWrap(True)
+        self._preview_status_lbl.setStyleSheet(
+            "color:#9ab; font-size:10px; border:1px solid #2a2a4a;"
+            " border-radius:3px; padding:4px; background:#111124;"
+        )
+        ps_lay.addWidget(self._preview_status_lbl)
+
+        self._full_preview_btn = QPushButton("⚡ Preview complet")
+        self._full_preview_btn.setToolTip(
+            "Exécute l'intégralité du pipeline (toutes les étapes activées)\n"
+            "sans sauvegarder le résultat."
+        )
+        self._full_preview_btn.setStyleSheet(
+            "QPushButton { background:#1e2a1e; color:#6e8; border:1px solid #3a5a3a;"
+            "  border-radius:4px; padding:5px 8px; font-size:11px; }"
+            "QPushButton:hover { background:#2a3a2a; color:#aea; }"
+            "QPushButton:disabled { color:#445; border-color:#223; }"
+        )
+        self._full_preview_btn.clicked.connect(self._run_full_preview)
+        ps_lay.addWidget(self._full_preview_btn)
+        ps_lay.addStretch()
+
+        preview_wrapper = QWidget()
+        pw_lay = QHBoxLayout(preview_wrapper)
+        pw_lay.setContentsMargins(0, 0, 0, 0)
+        pw_lay.setSpacing(0)
+        pw_lay.addWidget(self._preview_view, stretch=1)
+        pw_lay.addWidget(preview_sidebar)
+
+        self._tabs.addTab(preview_wrapper,                                "Preview")   # 0
+        self._tabs.addTab(self._mask_panel,                               "Masque")    # 1
+        self._tabs.addTab(self._wb_panel,                                 "Blanc")     # 2
+        self._tabs.addTab(self._wrap_with_sidebar(self._origin_view, _SIDEBAR_W), "Originale")  # 3
+        self._tabs.addTab(self._wrap_with_sidebar(self._dest_view,   _SIDEBAR_W), "Résultat")   # 4
 
         # Onglets diff JSON
         self._diff_source_panel = JsonDiffPanel()
         self._diff_source_panel.set_refresh_fn(self._refresh_diff_source)
-        self._tabs.addTab(self._diff_source_panel, "Δ Exports")   # 4
+        self._tabs.addTab(self._diff_source_panel, "Δ Exports")   # 5
         self._tabs.currentChanged.connect(self._on_tab_changed)
         rl.addWidget(self._tabs)
 
@@ -508,6 +559,11 @@ class BatchWindow(QMainWindow):
 
         if step_id in _FAST_PREVIEW_IDS:
             self._schedule_preview_update()
+            # Un changement de paramètre invalide le full-preview
+            if self._full_preview_worker is not None and self._full_preview_worker.isRunning():
+                self._full_preview_worker.cancel()
+                self._preview_status_lbl.setText("Preview rapide")
+                self._full_preview_btn.setEnabled(True)
 
     def _apply_param_silent(self, step_id: str, key: str, val) -> None:
         """Applique val silencieusement (undo/redo) : widget + cfg.step_params + preview."""
@@ -750,11 +806,11 @@ class BatchWindow(QMainWindow):
         self._prev_tab_index = index
 
         # 2. Charger le résultat si besoin (AVANT d'appliquer le zoom)
-        if index == 3 and self._current_cfg is not None:
+        if index == 4 and self._current_cfg is not None:
             self._update_dest_view(self._current_cfg)
 
         # 3. Actualiser les onglets diff
-        if index == 4:
+        if index == 5:
             self._refresh_diff_source()
 
         # 4. Appliquer le zoom au nouveau canvas, différé après le layout Qt
@@ -770,14 +826,16 @@ class BatchWindow(QMainWindow):
         self._schedule_preview_update()
 
     def _get_tab_canvas(self, index: int):
-        """Retourne le canvas zôomable de l'onglet (index 0–3) ou None."""
+        """Retourne le canvas zôomable de l'onglet (index 0–4) ou None."""
         if index == 0:
-            return self._mask_panel._canvas
+            return self._preview_view
         if index == 1:
-            return self._wb_panel._canvas
+            return self._mask_panel._canvas
         if index == 2:
-            return self._origin_view
+            return self._wb_panel._canvas
         if index == 3:
+            return self._origin_view
+        if index == 4:
             return self._dest_view
         return None
 
@@ -788,9 +846,9 @@ class BatchWindow(QMainWindow):
         self._preview_timer.start()
 
     def _do_preview_update(self) -> None:
-        """Calcule le fast-pipeline si l'onglet actif est Masque ou Blanc."""
-        tab = self._tabs.currentWidget()
-        if tab in (self._mask_panel, self._wb_panel):
+        """Calcule le fast-pipeline si l'onglet actif est Preview, Masque ou Blanc."""
+        idx = self._tabs.currentIndex()
+        if idx in (0, 1, 2):  # Preview, Masque, Blanc
             self._compute_and_show_fast_preview()
 
     # ── Aperçu rapide (tabs Masque / Blanc) ───────────────────────────────────
@@ -829,16 +887,20 @@ class BatchWindow(QMainWindow):
         return out
 
     def _refresh_panels(self, img: np.ndarray) -> None:
-        """Met à jour les panneaux Masque et Blanc avec l'image fournie.
+        """Met à jour les panneaux Masque, Blanc et Preview avec l'image fournie.
 
-        Utilise uniquement set_display_image sur les deux canvases pour
+        Utilise uniquement set_display_image sur les canvases masque/WB pour
         préserver le masque, le point WB et le zoom en cours.
+        Le preview view est mis à jour directement (affichage fast-preview).
         """
         if self._current_cfg is None:
             return
-        # set_display_image : image affichée seulement, sans toucher au masque, WB ni zoom
         self._mask_panel._canvas.set_display_image(img)
         self._wb_panel._canvas.set_display_image(img)
+        # Preview : afficher le fast-preview (invalide le full-preview)
+        self._preview_full_img = None
+        self._preview_view.set_image(img)
+        self._preview_status_lbl.setText("Preview rapide")
 
     # ── Helpers image résultat ────────────────────────────────────────────────
 
@@ -954,8 +1016,130 @@ class BatchWindow(QMainWindow):
 
     def _refresh_if_diff_tab(self) -> None:
         """Actualise le panneau diff si l'onglet actif est l'onglet Δ Exports."""
-        if self._tabs.currentIndex() == 4:
+        if self._tabs.currentIndex() == 5:
             self._refresh_diff_source()
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Preview complet (pipeline complet sans sauvegarde)
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _run_full_preview(self) -> None:
+        """Démarre un PipelineWorker ALL steps sur l'image courante, sans sauvegarder."""
+        cfg = self._current_cfg
+        img = self._current_orig
+        if cfg is None or img is None:
+            return
+        # Désactivé pendant un batch en cours
+        if self._worker is not None and self._worker.isRunning():
+            self._statusbar.showMessage("Preview complet indisponible pendant le batch.")
+            return
+        # Annuler un éventuel preview complet précédent
+        if self._full_preview_worker is not None and self._full_preview_worker.isRunning():
+            self._full_preview_worker.cancel()
+            self._full_preview_worker.wait(500)
+
+        self._preview_full_img = None
+        self._full_preview_btn.setEnabled(False)
+        self._preview_status_lbl.setText("⏳ Calcul...")
+        self._inject_instance_state(cfg)
+
+        enabled_order = [sid for sid in cfg.step_order if cfg.step_enabled.get(sid, True)]
+        steps = [self._steps_by_id[sid] for sid in enabled_order if sid in self._steps_by_id]
+
+        self._full_preview_worker = PipelineWorker(
+            run_id      = -1,
+            steps       = steps,
+            initial_img = img.copy(),
+            all_params  = cfg.step_params,
+            context     = {},
+            step_order  = cfg.step_order,
+            step_enabled= cfg.step_enabled,
+        )
+        self._full_preview_worker.all_done.connect(self._on_full_preview_done)
+        self._full_preview_worker.step_started.connect(
+            lambda sid: self._preview_status_lbl.setText(f"⏳ {sid}…")
+        )
+        self._full_preview_worker.start()
+
+    @pyqtSlot(object)
+    def _on_full_preview_done(self, entry) -> None:
+        """Reçoit le résultat du preview complet et met à jour l'onglet Preview."""
+        result_img = (
+            entry.step_results.get(entry.completed_steps[-1])
+            if entry.completed_steps else None
+        )
+        # Mettre à jour le context pour que l'overlay puisse lire les détections
+        if self._current_cfg is not None:
+            self._current_cfg.context.update(entry.context)
+
+        self._preview_full_img = result_img
+        self._full_preview_btn.setEnabled(True)
+
+        if result_img is not None:
+            self._preview_status_lbl.setText("Preview complet")
+            # Appliquer l'overlay si actif, sinon afficher directement
+            if self._preview_overlay_step:
+                overlay = self._build_overlay_img(result_img)
+                self._preview_view.set_image(overlay if overlay is not None else result_img)
+            else:
+                self._preview_view.set_image(result_img)
+        else:
+            self._preview_status_lbl.setText("Preview complet (sans résultat)")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Overlay de détection (facehighlight / redeye) — onglet Preview uniquement
+    # ══════════════════════════════════════════════════════════════════════════
+
+    @pyqtSlot(str, bool)
+    def _on_overlay_toggled(self, step_id: str, enabled: bool) -> None:
+        """Active/désactive l'overlay de détection dans l'onglet Preview."""
+        self._preview_overlay_step = step_id if enabled else None
+        self._refresh_preview_with_overlay()
+
+    def _refresh_preview_with_overlay(self) -> None:
+        """Redessine l'onglet Preview avec ou sans overlay selon l'état courant."""
+        if self._preview_full_img is None:
+            # Pas de full-preview → on ne peut pas afficher l'overlay
+            return
+        if self._preview_overlay_step:
+            overlay = self._build_overlay_img(self._preview_full_img)
+            self._preview_view.set_image(overlay if overlay is not None else self._preview_full_img)
+        else:
+            self._preview_view.set_image(self._preview_full_img)
+
+    def _build_overlay_img(self, base_img: np.ndarray) -> Optional[np.ndarray]:
+        """Dessine les annotations de détection sur base_img selon _preview_overlay_step."""
+        if base_img is None or self._current_cfg is None:
+            return None
+        context = self._current_cfg.context
+        overlay = base_img.copy()
+
+        if self._preview_overlay_step == "redeye":
+            for det in context.get("redeye_detections", []):
+                iris = det.get("iris")
+                if iris is None:
+                    continue
+                ix, iy, ir = iris
+                corrected = det.get("corrected", False)
+                color = (0, 220, 80) if corrected else (0, 180, 200)
+                cv2.circle(overlay, (int(ix), int(iy)), max(int(ir), 2), color, 2, cv2.LINE_AA)
+                cv2.circle(overlay, (int(ix), int(iy)), 1,
+                           (0, 255, 150) if corrected else (0, 220, 240), -1, cv2.LINE_AA)
+
+        elif self._preview_overlay_step == "facehighlight":
+            for det in context.get("highlight_detections", []):
+                bbox = det.get("bbox")
+                if bbox is None:
+                    continue
+                x1, y1, x2, y2 = bbox
+                overexp = det.get("overexp", 0.0)
+                color = (0, 170, 255)
+                cv2.rectangle(overlay, (x1, y1), (x2, y2), color, 2, cv2.LINE_AA)
+                cv2.putText(overlay, f"{overexp:.0%}",
+                            (x1 + 3, y1 + 17),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.50, color, 1, cv2.LINE_AA)
+
+        return overlay
 
     # ══════════════════════════════════════════════════════════════════════════
     # Export versionné — dropdown + lecture seule
@@ -1190,6 +1374,27 @@ class BatchWindow(QMainWindow):
             self._batch_done()
             return
         cfg = self._batch_queue.pop(0)
+
+        # ── Skip anticipé si la destination existe déjà ───────────────────────
+        if self._session.output_dir:
+            out_img = os.path.join(self._session.output_dir, cfg.filename)
+            if os.path.exists(out_img):
+                cfg.batch_status = "done"
+                self._strip.set_done(cfg.file_path, True)
+                self._batch_run_done += 1
+                total_str = f"/{self._batch_run_total}" if self._batch_run_total > 1 else ""
+                if hasattr(self, "_notif"):
+                    self._notif.notify(
+                        f"⏭ {cfg.filename}",
+                        f"Ignoré (déjà exporté)  •  {self._batch_run_done}{total_str}",
+                        level=Level.INFO,
+                        duration=3000,
+                        key="batch_progress",
+                    )
+                self._statusbar.showMessage(f"⏭ Ignoré (existe) : {cfg.filename}")
+                self._process_next_batch()
+                return
+
         cfg.batch_status = "running"
         self._strip.set_running(cfg.file_path, True)
         self._strip.select(cfg.file_path)
@@ -1304,7 +1509,7 @@ class BatchWindow(QMainWindow):
                 # set_display_image préserve masque, WB et zoom en cours
                 self._mask_panel._canvas.set_display_image(result_img)
                 self._wb_panel._canvas.set_display_image(result_img)
-                if self._tabs.currentIndex() == 3:
+                if self._tabs.currentIndex() == 4:
                     self._dest_view.set_image(result_img)
             # result_img n'est pas stocké dans cfg — libéré après écriture disque.
 
@@ -1415,6 +1620,8 @@ class BatchWindow(QMainWindow):
         self._batch_btn.setEnabled(not running)
         self._apply_btn.setEnabled(not running)
         self._stop_btn.setEnabled(running)
+        # Désactiver le preview complet pendant le batch
+        self._full_preview_btn.setEnabled(not running)
 
     def _on_strip_image_reset(self, file_path: str) -> None:
         cfg = self._config_for(file_path)
