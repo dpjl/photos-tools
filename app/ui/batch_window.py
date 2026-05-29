@@ -87,6 +87,8 @@ class BatchWindow(QMainWindow):
         self._applying_order = False
         # Flag pour éviter de push lors du redo/undo d'activation
         self._applying_enabled = False
+        # Flag pour bloquer les slots pendant l'affichage d'un export (lecture seule)
+        self._applying_export_view = False
         # État de zoom partagé entre les onglets
         self._prev_tab_index: int = 0
         self._shared_zoom: Optional[tuple] = None
@@ -238,7 +240,7 @@ class BatchWindow(QMainWindow):
 
         # Combo exports
         self._export_combo = QComboBox()
-        self._export_combo.setMaximumWidth(140)
+        self._export_combo.setMaximumWidth(185)
         self._export_combo.setToolTip(
             "Visualiser une configuration exportée précédente (lecture seule)"
         )
@@ -534,6 +536,8 @@ class BatchWindow(QMainWindow):
 
     @pyqtSlot(str, str, object)
     def _on_param_changed(self, step_id: str, key: str, value) -> None:
+        if self._applying_export_view:
+            return
         if self._current_cfg:
             # Capturer old_val AVANT mise à jour (step_params sert de snapshot)
             old_val = self._current_cfg.step_params.get(step_id, {}).get(key)
@@ -704,6 +708,8 @@ class BatchWindow(QMainWindow):
     @pyqtSlot(str, bool)
     def _on_enabled_changed(self, step_id: str, enabled: bool) -> None:
         if self._applying_enabled:
+            return
+        if self._applying_export_view:
             return
         # Capturer l'ancienne valeur avant mise à jour
         old_val = None
@@ -1223,7 +1229,8 @@ class BatchWindow(QMainWindow):
             self._is_viewing_export  = True
             self._viewed_export_path = path
             # Appliquer dans l'UI sans toucher _current_cfg
-            self._applying_order = True
+            self._applying_order       = True
+            self._applying_export_view = True
             if "step_order" in data:
                 self._step_list.set_order(data["step_order"])
             if "step_enabled" in data:
@@ -1236,7 +1243,8 @@ class BatchWindow(QMainWindow):
                     panel = self._step_list.get_panel(sid)
                     if panel:
                         panel.set_params(params)
-            self._applying_order = False
+            self._applying_order       = False
+            self._applying_export_view = False
             # Verrouiller
             self._step_list.setEnabled(False)
             self._restore_export_btn.setVisible(True)
