@@ -265,7 +265,7 @@ class ComparisonView(QWidget):
                     from ..utils.prefix_extractor import extract_prefix
                     candidates = [
                         f for f in img_path.parent.iterdir()
-                        if f.suffix.lower() == ".json"
+                        if f.name.lower().endswith(".result.json")
                         and extract_prefix(f.name) == group.key
                     ]
                     if candidates:

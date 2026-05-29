@@ -73,6 +73,13 @@ class DirSelectorDialog(QDialog):
         self._dir_edits: List[QLineEdit] = []
         self._count_labels: List[QLabel] = []
 
+        _ARROW_STYLE = (
+            "QPushButton { background:#2e2e2e; color:#aaa; border:1px solid #444;"
+            " border-radius:3px; padding:1px 4px; font-size:11px; }"
+            "QPushButton:hover { background:#3d3d3d; color:#fff; }"
+            "QPushButton:disabled { color:#444; border-color:#333; }"
+        )
+
         for i in range(MAX_INPUT_DIRS):
             lbl = QLabel(f"Dir {i + 1}:")
             lbl.setStyleSheet("color:#777; font-size:10px;")
@@ -92,10 +99,26 @@ class DirSelectorDialog(QDialog):
             count.setFixedWidth(88)
             count.setStyleSheet("color:#666; font-size:10px;")
 
+            btn_up = QPushButton("▲")
+            btn_up.setFixedWidth(24)
+            btn_up.setStyleSheet(_ARROW_STYLE)
+            btn_up.setToolTip("Monter")
+            btn_up.setEnabled(i > 0)
+            btn_up.clicked.connect(lambda _, idx=i: self._swap_rows(idx, idx - 1))
+
+            btn_down = QPushButton("▼")
+            btn_down.setFixedWidth(24)
+            btn_down.setStyleSheet(_ARROW_STYLE)
+            btn_down.setToolTip("Descendre")
+            btn_down.setEnabled(i < MAX_INPUT_DIRS - 1)
+            btn_down.clicked.connect(lambda _, idx=i: self._swap_rows(idx, idx + 1))
+
             grid.addWidget(lbl, i, 0)
             grid.addWidget(edit, i, 1)
             grid.addWidget(browse, i, 2)
             grid.addWidget(count, i, 3)
+            grid.addWidget(btn_up, i, 4)
+            grid.addWidget(btn_down, i, 5)
 
             self._dir_edits.append(edit)
             self._count_labels.append(count)
@@ -151,6 +174,15 @@ class DirSelectorDialog(QDialog):
 
     # ------------------------------------------------------------------
 
+    def _swap_rows(self, a: int, b: int):
+        if b < 0 or b >= MAX_INPUT_DIRS:
+            return
+        text_a = self._dir_edits[a].text()
+        text_b = self._dir_edits[b].text()
+        self._dir_edits[a].setText(text_b)
+        self._dir_edits[b].setText(text_a)
+        # counts are refreshed automatically via textChanged
+
     def _browse_src(self, idx: int):
         start = self._dir_edits[idx].text() or ""
         path = QFileDialog.getExistingDirectory(
@@ -177,7 +209,9 @@ class DirSelectorDialog(QDialog):
         if p.is_dir():
             try:
                 count = sum(
-                    1 for f in p.iterdir() if f.suffix.lower() in IMAGE_EXTENSIONS
+                    1 for f in p.iterdir()
+                    if f.suffix.lower() in IMAGE_EXTENSIONS
+                    and not f.name.lower().endswith(".mask.png")
                 )
                 lbl.setText(f"{count} images")
                 lbl.setStyleSheet("color:#4CAF50; font-size:10px;")

@@ -38,6 +38,8 @@ class DirectoryManager:
             for fp in directory.iterdir():
                 if fp.suffix.lower() not in IMAGE_EXTENSIONS:
                     continue
+                if fp.name.lower().endswith(".mask.png"):
+                    continue
                 key = extract_prefix(fp.name)
                 if key not in self._group_map:
                     self._group_map[key] = PhotoGroup(key=key)
@@ -50,7 +52,7 @@ class DirectoryManager:
             if not directory.is_dir():
                 continue
             for fp in directory.iterdir():
-                if fp.suffix.lower() != ".json":
+                if not fp.name.lower().endswith(".result.json"):
                     continue
                 key = extract_prefix(fp.name)
                 if key not in self._group_map:

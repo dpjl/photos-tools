@@ -18,6 +18,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import time
 from typing import Optional
 
 import cv2
@@ -43,6 +44,7 @@ from ui.mask_editor import MaskCanvasPanel
 from ui.wb_picker import WBPickerPanel
 from ui.image_view import SyncedImageView
 from ui.json_diff_panel import JsonDiffPanel
+from ui.notifications import NotificationManager, Level
 from ui.param_history import SetParamCommand, PropagateParamCommand, PropagateEnabledCommand, MoveStepCommand, ToggleStepCommand
 
 # Étapes dont les paramètres déclenchent un aperçu rapide
@@ -88,8 +90,18 @@ class BatchWindow(QMainWindow):
         self._prev_tab_index: int = 0
         self._shared_zoom: Optional[tuple] = None
 
+        # Compteurs de temps pour les notifications batch
+        self._batch_run_total: int  = 0    # total images dans le run courant
+        self._batch_run_done:  int  = 0    # images terminées dans le run courant
+        self._batch_run_start: float = 0.0 # timestamp début du run
+        self._image_start_time: float = 0.0  # timestamp début de l'image courante
+
         self._build_ui()
         self._apply_theme()
+
+        # Système de notifications flottantes
+        # Ancre = QMainWindow lui-même : les toasts sont indépendants de l'UI interne
+        self._notif = NotificationManager(self)
 
         # Raccourcis undo/redo : route vers le bon canvas selon l'onglet actif
         QShortcut(QKeySequence("Ctrl+Z"), self, self._undo)
@@ -535,6 +547,13 @@ class BatchWindow(QMainWindow):
 
         n = len(targets)
         self._statusbar.showMessage(f"Paramètre « {key} » propagé à {n} image(s).")
+        if hasattr(self, "_notif"):
+            self._notif.notify(
+                f"Propagé : «{key}»",
+                f"Étape {step_id}  •  {n} image(s)",
+                level=Level.INFO,
+                duration=3500,
+            )
 
     @pyqtSlot(str, bool)
     def _on_enabled_propagate(self, step_id: str, enabled: bool) -> None:
@@ -581,6 +600,13 @@ class BatchWindow(QMainWindow):
         n = len(targets)
         state_str = "activé" if enabled else "désactivé"
         self._statusbar.showMessage(f"Étape « {step_id} » {state_str} sur {n} image(s).")
+        if hasattr(self, "_notif"):
+            self._notif.notify(
+                f"Étape {state_str} : {step_id}",
+                f"Propagé à {n} image(s)",
+                level=Level.INFO,
+                duration=3500,
+            )
 
     @pyqtSlot(str, bool)
     def _on_enabled_changed(self, step_id: str, enabled: bool) -> None:
@@ -633,6 +659,7 @@ class BatchWindow(QMainWindow):
             # Sync cfg.wb_pick : undo() ne peut pas émettre pick_changed(None)
             if self._current_cfg:
                 self._current_cfg.wb_pick = self._wb_panel._canvas._pick_pt
+            self._schedule_preview_update()
         else:
             self._undo_stack.undo()
 
@@ -646,6 +673,7 @@ class BatchWindow(QMainWindow):
             # Sync cfg.wb_pick après redo
             if self._current_cfg:
                 self._current_cfg.wb_pick = self._wb_panel._canvas._pick_pt
+            self._schedule_preview_update()
         else:
             self._undo_stack.redo()
 
@@ -770,16 +798,14 @@ class BatchWindow(QMainWindow):
     def _refresh_panels(self, img: np.ndarray) -> None:
         """Met à jour les panneaux Masque et Blanc avec l'image fournie.
 
-        N'utilise que set_display_image sur le canvas masque pour préserver
-        le masque en cours de dessin (ne pas écraser avec cfg.inpaint_mask).
+        Utilise uniquement set_display_image sur les deux canvases pour
+        préserver le masque, le point WB et le zoom en cours.
         """
         if self._current_cfg is None:
             return
-        current_pick   = self._wb_panel.get_pick_point()
-        current_radius = self._wb_panel.get_patch_radius()
-        # set_display_image : met à jour l'image affichée sans toucher au masque
+        # set_display_image : image affichée seulement, sans toucher au masque, WB ni zoom
         self._mask_panel._canvas.set_display_image(img)
-        self._wb_panel.set_image(img, current_pick, current_radius)
+        self._wb_panel._canvas.set_display_image(img)
 
     # ── Helpers image résultat ────────────────────────────────────────────────
 
@@ -818,6 +844,13 @@ class BatchWindow(QMainWindow):
         self._statusbar.showMessage(
             f"Recipe rechargé depuis le disque : {os.path.basename(cfg.file_path)}"
         )
+        if hasattr(self, "_notif"):
+            self._notif.notify(
+                "Recipe rechargé",
+                os.path.basename(cfg.file_path),
+                level=Level.WARNING,
+                duration=3000,
+            )
 
     def _current_recipe_dict(self) -> Optional[dict]:
         """Génère le dict recipe depuis l'état actuel de l'UI (non encore sauvegardé)."""
@@ -969,6 +1002,9 @@ class BatchWindow(QMainWindow):
         """Démarre un traitement batch sur la liste fournie."""
         self._batch_queue    = queue
         self._batch_step_log: dict[str, list[dict]] = {}
+        self._batch_run_total = len(queue)
+        self._batch_run_done  = 0
+        self._batch_run_start = time.monotonic()
         self._set_buttons_running(True)
         self._process_next_batch()
 
@@ -981,6 +1017,7 @@ class BatchWindow(QMainWindow):
         self._strip.set_running(cfg.file_path, True)
         self._strip.select(cfg.file_path)
         self._navigate_to(cfg)
+        self._image_start_time = time.monotonic()
 
         img = cv2.imread(cfg.file_path, cv2.IMREAD_COLOR)
         if img is None:
@@ -997,6 +1034,21 @@ class BatchWindow(QMainWindow):
         self._set_buttons_running(False)
         n = len(self._session.images)
         self._statusbar.showMessage(f"Batch terminé — {n} image(s) traitée(s)")
+        if hasattr(self, "_notif") and self._batch_run_total > 0:
+            elapsed = time.monotonic() - self._batch_run_start
+            # Fermer le toast de progression en cours avant d'afficher le résumé
+            self._notif.dismiss_key("batch_progress")
+            body = (
+                f"Durée totale : {elapsed:.1f}s"
+                + (f"  •  {elapsed/self._batch_run_done:.1f}s/image"
+                   if self._batch_run_done > 0 else "")
+            )
+            self._notif.notify(
+                f"⚡ Batch terminé — {self._batch_run_done}/{self._batch_run_total} image(s)",
+                body,
+                level=Level.SUCCESS,
+                duration=12000,
+            )
 
     # ══════════════════════════════════════════════════════════════════════════
     # Worker
@@ -1072,8 +1124,9 @@ class BatchWindow(QMainWindow):
             self._strip.update_result_thumb(cfg.file_path, result_img)
             # Mettre à jour les panneaux si c'est l'image courante
             if cfg is self._current_cfg:
-                self._mask_panel.set_image(result_img, cfg.inpaint_mask)
-                self._wb_panel.set_image(result_img, cfg.wb_pick, cfg.wb_patch_radius)
+                # set_display_image préserve masque, WB et zoom en cours
+                self._mask_panel._canvas.set_display_image(result_img)
+                self._wb_panel._canvas.set_display_image(result_img)
                 if self._tabs.currentIndex() == 3:
                     self._dest_view.set_image(result_img)
             # result_img n'est pas stocké dans cfg — libéré après écriture disque.
@@ -1081,6 +1134,19 @@ class BatchWindow(QMainWindow):
         cfg.batch_status = "done"
         self._strip.set_running(cfg.file_path, False)
         self._strip.set_done(cfg.file_path, True)
+
+        # Notification image traitée (mise à jour in-place via key)
+        if hasattr(self, "_notif"):
+            elapsed = time.monotonic() - self._image_start_time
+            self._batch_run_done += 1
+            total_str = f"/{self._batch_run_total}" if self._batch_run_total > 1 else ""
+            self._notif.notify(
+                f"✓ {cfg.filename}",
+                f"Traité en {elapsed:.1f}s  •  {self._batch_run_done}{total_str}",
+                level=Level.SUCCESS,
+                duration=5000,
+                key="batch_progress",
+            )
 
         # Sidecar résultat JSON + image
         step_log = build_step_log(
