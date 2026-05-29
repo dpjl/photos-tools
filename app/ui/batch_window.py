@@ -27,7 +27,7 @@ import numpy as np
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QLabel,
     QPushButton, QSplitter, QScrollArea, QTabWidget,
-    QFileDialog, QStatusBar, QSizePolicy, QMessageBox,
+    QFileDialog, QStatusBar, QSizePolicy, QMessageBox, QComboBox,
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSlot, pyqtSignal, QObject
 from PyQt6.QtGui import QCloseEvent, QUndoStack, QKeySequence, QShortcut
@@ -36,6 +36,7 @@ from core.pipeline import PipelineWorker
 from core.batch import (
     BatchSession, BatchImageConfig, build_step_log,
     save_recipe, load_recipe, _apply_recipe,
+    list_export_recipes, load_export_recipe,
 )
 from steps import ALL_STEPS
 from ui.step_panel import StepListWidget
@@ -224,6 +225,39 @@ class BatchWindow(QMainWindow):
         hdr_lbl = QLabel("Étapes — par image")
         hdr_lbl.setStyleSheet("color:#ddd; font-size:12px; font-weight:700;")
         hdr_lay.addWidget(hdr_lbl, stretch=1)
+
+        # Combo exports
+        self._export_combo = QComboBox()
+        self._export_combo.setMaximumWidth(140)
+        self._export_combo.setToolTip(
+            "Visualiser une configuration exportée précédente (lecture seule)"
+        )
+        self._export_combo.setStyleSheet(
+            "QComboBox { background:#1a1a30; color:#9de; border:1px solid #2a2a4a;"
+            "  border-radius:3px; padding:2px 4px; font-size:10px; }"
+            "QComboBox::drop-down { border:none; }"
+            "QComboBox QAbstractItemView { background:#1a1a30; color:#9de;"
+            "  selection-background-color:#2a3a5a; border:1px solid #3a3a6a; }"
+        )
+        self._export_combo.currentIndexChanged.connect(self._on_export_selected)
+        hdr_lay.addWidget(self._export_combo)
+
+        # Bouton restaurer
+        self._restore_export_btn = QPushButton("↩")
+        self._restore_export_btn.setFixedSize(24, 24)
+        self._restore_export_btn.setVisible(False)
+        self._restore_export_btn.setToolTip(
+            "Restaurer cette configuration en mode édition\n"
+            "(chargement mémoire uniquement — sauvegarder ensuite si souhaité)"
+        )
+        self._restore_export_btn.setStyleSheet(
+            "QPushButton { background:#2a3a2a; color:#6e8; border-radius:4px;"
+            "  font-size:14px; }"
+            "QPushButton:hover { background:#3a4a3a; color:#aea; }"
+        )
+        self._restore_export_btn.clicked.connect(self._restore_export)
+        hdr_lay.addWidget(self._restore_export_btn)
+
         self._reload_recipe_btn = QPushButton("↺")
         self._reload_recipe_btn.setFixedSize(24, 24)
         self._reload_recipe_btn.setToolTip(
@@ -301,10 +335,7 @@ class BatchWindow(QMainWindow):
         # Onglets diff JSON
         self._diff_source_panel = JsonDiffPanel()
         self._diff_source_panel.set_refresh_fn(self._refresh_diff_source)
-        self._diff_result_panel = JsonDiffPanel()
-        self._diff_result_panel.set_refresh_fn(self._refresh_diff_result)
-        self._tabs.addTab(self._diff_source_panel, "Δ Recipe")   # 4
-        self._tabs.addTab(self._diff_result_panel, "Δ Résultat")  # 5
+        self._tabs.addTab(self._diff_source_panel, "Δ Exports")   # 4
         self._tabs.currentChanged.connect(self._on_tab_changed)
         rl.addWidget(self._tabs)
 
@@ -385,6 +416,10 @@ class BatchWindow(QMainWindow):
 
         fname = os.path.basename(cfg.file_path)
         self._statusbar.showMessage(f"{fname}  —  prêt")
+
+        # Réinitialiser le mode export et recharger le dropdown
+        self._set_viewing_export(None, _navigate_call=True)
+        self._refresh_export_dropdown(cfg)
 
         # Mettre à jour les panneaux (mosaïque ou aperçu rapide)
         self._schedule_preview_update()
@@ -721,8 +756,6 @@ class BatchWindow(QMainWindow):
         # 3. Actualiser les onglets diff
         if index == 4:
             self._refresh_diff_source()
-        elif index == 5:
-            self._refresh_diff_result()
 
         # 4. Appliquer le zoom au nouveau canvas, différé après le layout Qt
         #    (set_image appelle fit_in_view → sans différé, le zoom serait écrasé)
@@ -872,50 +905,194 @@ class BatchWindow(QMainWindow):
         }
 
     def _refresh_diff_source(self) -> None:
-        """Actualise l'onglet Δ Recipe : actuel vs .recipe.json sur disque."""
-        current = self._current_recipe_dict()
-        if current is None:
+        """Actualise l'onglet Δ Exports : version sélectionnée vs précédente (n-1).
+
+        Mode édition : actuel (UI) vs dernier export sur disque.
+        Mode lecture seule (export visionné) : export N vs export N-1.
+        """
+        if self._current_cfg is None:
             self._diff_source_panel.update_diff(None, None)
             return
-        disk = load_recipe(self._current_cfg.file_path)
-        if disk is not None:
-            disk.pop("_mask", None)   # éviter d'afficher le tableau binaire
-        stem = os.path.splitext(os.path.basename(self._current_cfg.file_path))[0]
-        self._diff_source_panel.update_diff(
-            current, disk,
-            left_label  = f"{stem} (actuel)",
-            right_label = f"{stem}.recipe.json (disque)",
-        )
 
-    def _refresh_diff_result(self) -> None:
-        """Actualise l'onglet Δ Résultat : actuel vs .result.json dans output_dir."""
-        current = self._current_recipe_dict()
-        if current is None:
-            self._diff_result_panel.update_diff(None, None)
-            return
-        stem      = os.path.splitext(os.path.basename(self._current_cfg.file_path))[0]
-        disk      = None
-        if self._session.output_dir:
-            result_path = os.path.join(self._session.output_dir, stem + ".result.json")
-            if os.path.exists(result_path):
-                try:
-                    with open(result_path, encoding="utf-8") as f:
-                        disk = json.load(f)
-                except Exception:
-                    pass
-        self._diff_result_panel.update_diff(
-            current, disk,
-            left_label  = f"{stem} (actuel)",
-            right_label = f"{stem}.result.json (sortie)",
+        stem = os.path.splitext(os.path.basename(self._current_cfg.file_path))[0]
+        exports = self._viewed_export_list  # [(N, path), ...] déjà trié
+
+        if self._is_viewing_export and self._viewed_export_path:
+            # Mode lecture seule : diff export N vs export N-1
+            current_data = load_export_recipe(self._viewed_export_path)
+            # Trouver le prédécesseur dans la liste
+            idx_in_list = next(
+                (i for i, (_, p) in enumerate(exports) if p == self._viewed_export_path),
+                None,
+            )
+            if idx_in_list is not None and idx_in_list > 0:
+                prev_n, prev_path = exports[idx_in_list - 1]
+                ref_data = load_export_recipe(prev_path)
+                ref_label = f"{stem} — Export {prev_n:03d}"
+            else:
+                ref_data  = None
+                ref_label = "(pas de version précédente)"
+            cur_n = exports[idx_in_list][0] if idx_in_list is not None else "?"
+            cur_label = f"{stem} — Export {cur_n:03d}"
+        else:
+            # Mode édition : actuel vs dernier export
+            current_data = self._current_recipe_dict()
+            if exports:
+                last_n, last_path = exports[-1]
+                ref_data  = load_export_recipe(last_path)
+                ref_label = f"{stem} — Export {last_n:03d}"
+            else:
+                ref_data  = None
+                ref_label = "(pas encore exporté)"
+            cur_label = f"{stem} (actuel)"
+
+        self._diff_source_panel.update_diff(
+            current_data, ref_data,
+            left_label  = cur_label,
+            right_label = ref_label,
         )
 
     def _refresh_if_diff_tab(self) -> None:
-        """Actualise le panneau diff si l'onglet actif est un onglet diff."""
-        idx = self._tabs.currentIndex()
-        if idx == 4:
+        """Actualise le panneau diff si l'onglet actif est l'onglet Δ Exports."""
+        if self._tabs.currentIndex() == 4:
             self._refresh_diff_source()
-        elif idx == 5:
-            self._refresh_diff_result()
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Export versionné — dropdown + lecture seule
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _refresh_export_dropdown(self, cfg: BatchImageConfig) -> None:
+        """Repeuple le combo exports pour l'image donnée et revient à 'Courante'."""
+        if not self._session.output_dir:
+            exports = []
+        else:
+            exports = list_export_recipes(cfg.file_path, self._session.output_dir)
+        self._viewed_export_list = exports
+
+        self._export_combo.blockSignals(True)
+        self._export_combo.clear()
+        self._export_combo.addItem("Courante")
+        for n, path in exports:
+            label = f"Export {n:03d}"
+            self._export_combo.addItem(label, userData=path)
+        self._export_combo.setCurrentIndex(0)
+        self._export_combo.blockSignals(False)
+        # Mettre à jour la visibilité selon le nombre d'exports
+        self._export_combo.setVisible(True)
+
+    @pyqtSlot(int)
+    def _on_export_selected(self, index: int) -> None:
+        """Slot déclenché quand l'utilisateur sélectionne un élément du combo."""
+        if index <= 0:
+            self._set_viewing_export(None)
+        else:
+            path = self._export_combo.itemData(index)
+            self._set_viewing_export(path)
+
+    def _set_viewing_export(
+        self,
+        path: Optional[str],
+        _navigate_call: bool = False,
+    ) -> None:
+        """Active ou désactive le mode lecture seule sur un export versionné.
+
+        path=None  → mode édition normal.
+        path=str   → mode lecture seule : charge l'export dans l'UI sans
+                     modifier _current_cfg ; active le verrou.
+        _navigate_call : si True, n'émet pas de signal vers le combo (évite
+                         les boucles lors de _navigate_to).
+        """
+        if path is None:
+            # ── Retour en mode édition ────────────────────────────────────
+            self._is_viewing_export  = False
+            self._viewed_export_path = None
+            self._step_list.setEnabled(True)
+            self._restore_export_btn.setVisible(False)
+            # Réafficher la config courante dans l'UI
+            cfg = self._current_cfg
+            if cfg is not None:
+                self._applying_order = True
+                for sid, enabled in cfg.step_enabled.items():
+                    panel = self._step_list.get_panel(sid)
+                    if panel:
+                        panel.set_enabled(enabled)
+                for sid, params in cfg.step_params.items():
+                    panel = self._step_list.get_panel(sid)
+                    if panel:
+                        panel.set_params(params)
+                self._step_list.set_order(cfg.step_order)
+                self._applying_order = False
+            if not _navigate_call:
+                self._export_combo.blockSignals(True)
+                self._export_combo.setCurrentIndex(0)
+                self._export_combo.blockSignals(False)
+            self._refresh_if_diff_tab()
+        else:
+            # ── Mode lecture seule ────────────────────────────────────────
+            data = load_export_recipe(path)
+            if data is None:
+                self._statusbar.showMessage("Impossible de charger l'export.")
+                self._export_combo.blockSignals(True)
+                self._export_combo.setCurrentIndex(0)
+                self._export_combo.blockSignals(False)
+                return
+            self._is_viewing_export  = True
+            self._viewed_export_path = path
+            # Appliquer dans l'UI sans toucher _current_cfg
+            self._applying_order = True
+            if "step_order" in data:
+                self._step_list.set_order(data["step_order"])
+            if "step_enabled" in data:
+                for sid, val in data["step_enabled"].items():
+                    panel = self._step_list.get_panel(sid)
+                    if panel:
+                        panel.set_enabled(val)
+            if "step_params" in data:
+                for sid, params in data["step_params"].items():
+                    panel = self._step_list.get_panel(sid)
+                    if panel:
+                        panel.set_params(params)
+            self._applying_order = False
+            # Verrouiller
+            self._step_list.setEnabled(False)
+            self._restore_export_btn.setVisible(True)
+            n_str = os.path.basename(path)
+            self._statusbar.showMessage(f"Lecture seule : {n_str}")
+            self._refresh_if_diff_tab()
+
+    def _restore_export(self) -> None:
+        """Restaure la configuration de l'export visionné dans _current_cfg (en mémoire)."""
+        if not self._is_viewing_export or not self._viewed_export_path:
+            return
+        cfg = self._current_cfg
+        if cfg is None:
+            return
+        data = load_export_recipe(self._viewed_export_path)
+        if data is None:
+            return
+        _apply_recipe(cfg, data)
+        self._set_viewing_export(None)
+        # Recharger l'UI depuis cfg mis à jour
+        self._applying_order = True
+        for sid, enabled in cfg.step_enabled.items():
+            panel = self._step_list.get_panel(sid)
+            if panel:
+                panel.set_enabled(enabled)
+        for sid, params in cfg.step_params.items():
+            panel = self._step_list.get_panel(sid)
+            if panel:
+                panel.set_params(params)
+        self._step_list.set_order(cfg.step_order)
+        self._applying_order = False
+        self._statusbar.showMessage("Configuration restaurée depuis l'export (non sauvegardée).")
+        if hasattr(self, "_notif"):
+            stem = os.path.splitext(os.path.basename(cfg.file_path))[0]
+            self._notif.notify(
+                "Configuration restaurée",
+                f"{stem} — export chargé en mémoire",
+                level=Level.WARNING,
+                duration=4000,
+            )
 
     # ══════════════════════════════════════════════════════════════════════════
     # Lancer la sélection
@@ -1147,6 +1324,10 @@ class BatchWindow(QMainWindow):
                 duration=5000,
                 key="batch_progress",
             )
+
+        # Rafraîchir le dropdown si c'est l'image courante (nouvel export vient d'être créé)
+        if cfg is self._current_cfg:
+            self._refresh_export_dropdown(cfg)
 
         # Sidecar résultat JSON + image
         step_log = build_step_log(
