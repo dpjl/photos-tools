@@ -1147,10 +1147,8 @@ class BatchWindow(QMainWindow):
 
     def _refresh_export_dropdown(self, cfg: BatchImageConfig) -> None:
         """Repeuple le combo exports pour l'image donnée et revient à 'Courante'."""
-        if not self._session.output_dir:
-            exports = []
-        else:
-            exports = list_export_recipes(cfg.file_path, self._session.output_dir)
+        # Les exports {stem}.export.NNN.json sont toujours à côté de la source
+        exports = list_export_recipes(cfg.file_path)
         self._viewed_export_list = exports
 
         self._export_combo.blockSignals(True)

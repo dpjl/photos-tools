@@ -215,8 +215,8 @@ class BatchSession:
         with open(out_json, "w", encoding="utf-8") as f:
             json.dump(sidecar, f, ensure_ascii=False, indent=2)
 
-        # ── Export recipe versionné ───────────────────────────────────────────
-        save_export_recipe(config, self.output_dir)
+        # ── Export recipe versionné (à côté de la source) ────────────────────
+        save_export_recipe(config)
 
         return out_img, out_json
 
@@ -293,108 +293,20 @@ def load_recipe(file_path: str) -> Optional[dict]:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# Exports versionnés (sauvegardes à chaque traitement réussi)
+# Exports versionnés — stockés à côté de la SOURCE
+# (même répertoire que {stem}.recipe.json et {stem}.mask.png)
 # ════════════════════════════════════════════════════════════════════════════
 
-def _export_stem_pattern(stem: str) -> str:
-    """Pattern glob pour les exports d'un stem donné."""
-    return f"{stem}.export.*.json"
-
-
-def list_export_recipes(
-    file_path:  str,
-    output_dir: str,
-) -> list[tuple[int, str]]:
-    """Liste les exports versionnés ``{stem}.export.NNN.json`` dans output_dir.
+def list_export_recipes(file_path: str) -> list[tuple[int, str]]:
+    """Liste les exports versionnés ``{stem}.export.NNN.json`` à côté de la source.
 
     Retourne ``[(N, chemin_absolu), ...]`` trié par N croissant.
     Ne retourne que les entrées dont le numéro est valide (entier > 0).
     """
     import glob
+    source_dir = os.path.dirname(file_path)
     stem = os.path.splitext(os.path.basename(file_path))[0]
-    pattern = os.path.join(output_dir, f"{stem}.export.*.json")
-    result: list[tuple[int, str]] = []
-    for path in glob.glob(pattern):
-        base = os.path.basename(path)
-        # {stem}.export.{NNN}.json
-        try:
-            num_str = base[len(stem) + len(".export.") : -len(".json")]
-            n = int(num_str)
-            if n > 0:
-                result.append((n, path))
-        except (ValueError, IndexError):
-            continue
-    result.sort(key=lambda x: x[0])
-    return result
-
-
-def next_export_index(file_path: str, output_dir: str) -> int:
-    """Retourne le prochain numéro d'export disponible (max existant + 1, ou 1)."""
-    exports = list_export_recipes(file_path, output_dir)
-    return exports[-1][0] + 1 if exports else 1
-
-
-def save_export_recipe(config: "BatchImageConfig", output_dir: str) -> Optional[str]:
-    """Sauvegarde un export versionné ``{stem}.export.NNN.json`` dans output_dir.
-
-    Appelé après chaque traitement réussi. Le JSON a la même structure que
-    save_recipe() avec en plus la clé ``exported_at``.
-    Retourne le chemin du fichier créé, ou ``None`` si échec.
-    """
-    try:
-        os.makedirs(output_dir, exist_ok=True)
-        stem  = os.path.splitext(os.path.basename(config.file_path))[0]
-        idx   = next_export_index(config.file_path, output_dir)
-        fname = f"{stem}.export.{idx:03d}.json"
-        path  = os.path.join(output_dir, fname)
-        recipe: dict = {
-            "version":        1,
-            "exported_at":    datetime.now().isoformat(timespec="seconds"),
-            "export_index":   idx,
-            "customized":     config.customized,
-            "step_order":     config.step_order,
-            "step_enabled":   config.step_enabled,
-            "step_params":    config.step_params,
-            "wb_pick":        list(config.wb_pick) if config.wb_pick else None,
-            "wb_patch_radius": config.wb_patch_radius,
-            "has_mask":       config.inpaint_mask is not None,
-        }
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(recipe, f, ensure_ascii=False, indent=2)
-        return path
-    except Exception:
-        return None
-
-
-def load_export_recipe(path: str) -> Optional[dict]:
-    """Charge un export versionné depuis son chemin absolu.
-
-    Retourne le dictionnaire ou ``None`` si absent ou invalide.
-    """
-    if not os.path.exists(path):
-        return None
-    try:
-        with open(path, encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return None
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Exports versionnés (sauvegardes à chaque traitement réussi)
-# ══════════════════════════════════════════════════════════════════════════════
-
-def list_export_recipes(
-    file_path:  str,
-    output_dir: str,
-) -> list[tuple[int, str]]:
-    """Liste les exports versionnés ``{stem}.export.NNN.json`` dans output_dir.
-
-    Retourne ``[(N, chemin_absolu), ...]`` trié par N croissant.
-    """
-    import glob
-    stem = os.path.splitext(os.path.basename(file_path))[0]
-    pattern = os.path.join(output_dir, f"{stem}.export.*.json")
+    pattern = os.path.join(source_dir, f"{stem}.export.*.json")
     result: list[tuple[int, str]] = []
     for path in glob.glob(pattern):
         base = os.path.basename(path)
@@ -409,25 +321,25 @@ def list_export_recipes(
     return result
 
 
-def next_export_index(file_path: str, output_dir: str) -> int:
+def next_export_index(file_path: str) -> int:
     """Retourne le prochain numéro d'export disponible (max existant + 1, ou 1)."""
-    exports = list_export_recipes(file_path, output_dir)
+    exports = list_export_recipes(file_path)
     return exports[-1][0] + 1 if exports else 1
 
 
-def save_export_recipe(config: "BatchImageConfig", output_dir: str) -> Optional[str]:
-    """Sauvegarde un export versionné ``{stem}.export.NNN.json`` dans output_dir.
+def save_export_recipe(config: "BatchImageConfig") -> Optional[str]:
+    """Sauvegarde un export versionné ``{stem}.export.NNN.json`` à côté de la source.
 
-    Appelé après chaque traitement réussi. Le JSON a la même structure que
-    save_recipe() avec en plus la clé ``exported_at``.
+    Appelé après chaque traitement réussi. Même structure que save_recipe()
+    avec en plus les clés ``exported_at`` et ``export_index``.
     Retourne le chemin du fichier créé, ou ``None`` si échec.
     """
     try:
-        os.makedirs(output_dir, exist_ok=True)
+        source_dir = os.path.dirname(config.file_path)
         stem  = os.path.splitext(os.path.basename(config.file_path))[0]
-        idx   = next_export_index(config.file_path, output_dir)
+        idx   = next_export_index(config.file_path)
         fname = f"{stem}.export.{idx:03d}.json"
-        path  = os.path.join(output_dir, fname)
+        path  = os.path.join(source_dir, fname)
         recipe: dict = {
             "version":        1,
             "exported_at":    datetime.now().isoformat(timespec="seconds"),
