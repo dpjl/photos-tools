@@ -1217,6 +1217,9 @@ class BatchWindow(QMainWindow):
                 self._export_combo.setCurrentIndex(0)
                 self._export_combo.blockSignals(False)
             self._refresh_if_diff_tab()
+            # Rafraîchir le preview avec les params courants restaurés
+            if not _navigate_call:
+                self._schedule_preview_update()
         else:
             # ── Mode lecture seule ────────────────────────────────────────
             data = load_export_recipe(path)
@@ -1251,6 +1254,9 @@ class BatchWindow(QMainWindow):
             n_str = os.path.basename(path)
             self._statusbar.showMessage(f"Lecture seule : {n_str}")
             self._refresh_if_diff_tab()
+            # Déclencher le fast-preview avec les params de l'export affiché
+            # (les panels contiennent déjà les params de l'export)
+            self._schedule_preview_update()
 
     def _restore_export(self) -> None:
         """Restaure la configuration de l'export visionné dans _current_cfg (en mémoire)."""
