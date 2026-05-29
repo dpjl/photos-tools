@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import List
 
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -50,6 +51,7 @@ class DirSelectorDialog(QDialog):
         current_dirs: List[str],
         output_dir: str,
         parent: QWidget = None,
+        current_enabled: List[bool] = None,
     ):
         super().__init__(parent)
         self.setWindowTitle("Sélection des répertoires")
@@ -71,6 +73,8 @@ class DirSelectorDialog(QDialog):
         grid.setContentsMargins(6, 4, 6, 4)
 
         self._dir_edits: List[QLineEdit] = []
+        self._dir_checks: List[QCheckBox] = []
+        self._dir_browses: List[QPushButton] = []
         self._count_labels: List[QLabel] = []
 
         _ARROW_STYLE = (
@@ -79,8 +83,23 @@ class DirSelectorDialog(QDialog):
             "QPushButton:hover { background:#3d3d3d; color:#fff; }"
             "QPushButton:disabled { color:#444; border-color:#333; }"
         )
+        _CHECK_STYLE = (
+            "QCheckBox { spacing:0px; }"
+            "QCheckBox::indicator { width:14px; height:14px; border:1px solid #555;"
+            " border-radius:2px; background:#2a2a2a; }"
+            "QCheckBox::indicator:checked { background:#2e7a2e; border-color:#4CAF50; }"
+        )
 
         for i in range(MAX_INPUT_DIRS):
+            enabled = (current_enabled[i] if current_enabled and i < len(current_enabled) else True)
+
+            chk = QCheckBox()
+            chk.setChecked(enabled)
+            chk.setToolTip("Activer / désactiver ce répertoire")
+            chk.setStyleSheet(_CHECK_STYLE)
+            chk.setFixedWidth(20)
+            chk.stateChanged.connect(lambda state, idx=i: self._toggle_row_enabled(idx))
+
             lbl = QLabel(f"Dir {i + 1}:")
             lbl.setStyleSheet("color:#777; font-size:10px;")
             lbl.setFixedWidth(36)
@@ -113,15 +132,21 @@ class DirSelectorDialog(QDialog):
             btn_down.setEnabled(i < MAX_INPUT_DIRS - 1)
             btn_down.clicked.connect(lambda _, idx=i: self._swap_rows(idx, idx + 1))
 
-            grid.addWidget(lbl, i, 0)
-            grid.addWidget(edit, i, 1)
-            grid.addWidget(browse, i, 2)
-            grid.addWidget(count, i, 3)
-            grid.addWidget(btn_up, i, 4)
-            grid.addWidget(btn_down, i, 5)
+            grid.addWidget(chk,      i, 0)
+            grid.addWidget(lbl,      i, 1)
+            grid.addWidget(edit,     i, 2)
+            grid.addWidget(browse,   i, 3)
+            grid.addWidget(count,    i, 4)
+            grid.addWidget(btn_up,   i, 5)
+            grid.addWidget(btn_down, i, 6)
 
+            self._dir_checks.append(chk)
             self._dir_edits.append(edit)
+            self._dir_browses.append(browse)
             self._count_labels.append(count)
+
+            if not enabled:
+                self._toggle_row_enabled(i)
 
         scroll.setWidget(inner)
         src_layout = QVBoxLayout(src_group)
@@ -167,12 +192,41 @@ class DirSelectorDialog(QDialog):
     # ------------------------------------------------------------------
 
     def get_input_dirs(self) -> List[str]:
-        return [e.text().strip() for e in self._dir_edits if e.text().strip()]
+        """Return only enabled non-empty dirs (used by DirectoryManager)."""
+        return [
+            e.text().strip()
+            for e, chk in zip(self._dir_edits, self._dir_checks)
+            if e.text().strip() and chk.isChecked()
+        ]
+
+    def get_all_dir_data(self) -> List[dict]:
+        """Return all non-empty rows as [{path, enabled}] — used for persistence."""
+        result = []
+        for e, chk in zip(self._dir_edits, self._dir_checks):
+            path = e.text().strip()
+            if path:
+                result.append({"path": path, "enabled": chk.isChecked()})
+        return result
 
     def get_output_dir(self) -> str:
         return self._out_edit.text().strip()
 
     # ------------------------------------------------------------------
+
+    def _toggle_row_enabled(self, idx: int):
+        enabled = self._dir_checks[idx].isChecked()
+        alpha = "ff" if enabled else "55"
+        self._dir_edits[idx].setEnabled(enabled)
+        self._dir_edits[idx].setStyleSheet(
+            _EDIT_STYLE if enabled
+            else "QLineEdit { background:#181818; color:#555; border:1px solid #333;"
+                 " border-radius:3px; padding:3px; }"
+        )
+        self._dir_browses[idx].setEnabled(enabled)
+        self._count_labels[idx].setStyleSheet(
+            "color:#666; font-size:10px;" if enabled
+            else "color:#444; font-size:10px;"
+        )
 
     def _swap_rows(self, a: int, b: int):
         if b < 0 or b >= MAX_INPUT_DIRS:
@@ -181,7 +235,11 @@ class DirSelectorDialog(QDialog):
         text_b = self._dir_edits[b].text()
         self._dir_edits[a].setText(text_b)
         self._dir_edits[b].setText(text_a)
-        # counts are refreshed automatically via textChanged
+        # Also swap checkbox states (triggers _toggle_row_enabled via signal)
+        checked_a = self._dir_checks[a].isChecked()
+        checked_b = self._dir_checks[b].isChecked()
+        self._dir_checks[a].setChecked(checked_b)
+        self._dir_checks[b].setChecked(checked_a)
 
     def _browse_src(self, idx: int):
         start = self._dir_edits[idx].text() or ""

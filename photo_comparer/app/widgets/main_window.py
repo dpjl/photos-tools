@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStatusBar,
     QToolBar,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -47,8 +48,10 @@ from ..utils import export_store
 from .comparison_view import ComparisonView
 from .dir_selector_dialog import DirSelectorDialog
 from .nav_panel import NavPanel
+from .note_panel import NotePanel
 
 CONFIG_PATH = Path.home() / ".photo_comparer_config.json"
+NOTES_PATH  = Path.home() / ".photo_comparer_notes.json"
 
 _TOOLBAR_STYLE = """
 QToolBar {
@@ -103,6 +106,8 @@ class MainWindow(QMainWindow):
         self._current_group_index: int = -1
         self._best_path: Optional[Path] = None
         self._best_dir_index: int = -1   # dir index of the current best selection
+        self._all_dir_data: list = []    # [{"path": str, "enabled": bool}, ...]
+        self._notes: dict = {}           # group_key → note text
 
         # --- Widgets ---
         self._nav = NavPanel(self._dir_manager, self)
@@ -114,7 +119,19 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([180, 1260])
-        self.setCentralWidget(splitter)
+
+        # Note panel (hidden by default, toggled via toolbar)
+        self._note_panel = NotePanel()
+        self._note_panel.hide()
+        self._note_panel.note_changed.connect(self._on_note_changed)
+
+        central = QWidget()
+        central_layout = QVBoxLayout(central)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setSpacing(0)
+        central_layout.addWidget(splitter)
+        central_layout.addWidget(self._note_panel)
+        self.setCentralWidget(central)
 
         # --- Toolbar ---
         self._setup_toolbar()
@@ -132,6 +149,7 @@ class MainWindow(QMainWindow):
         self._setup_shortcuts()
 
         # --- Restore config ---
+        self._load_notes()
         self._load_config()
 
     # ------------------------------------------------------------------
@@ -198,6 +216,14 @@ class MainWindow(QMainWindow):
         tb.addWidget(self._info_lbl)
         tb.addSeparator()
 
+        # Notes toggle button
+        self._notes_btn = QPushButton("\U0001f4dd Notes")
+        self._notes_btn.setToolTip("Afficher / masquer les notes (N)")
+        self._notes_btn.setStyleSheet(_MODE_BTN_INACTIVE)
+        self._notes_btn.clicked.connect(self._toggle_notes_panel)
+        tb.addWidget(self._notes_btn)
+        tb.addSeparator()
+
         # Copy best button
         self._copy_btn = QPushButton("Copier la meilleure  →")
         self._copy_btn.setToolTip(
@@ -227,6 +253,7 @@ class MainWindow(QMainWindow):
         sc("1",      self._cmp.zoom_100)
         sc("Ctrl+Return", self._copy_best)
         sc("Ctrl+F", lambda: self._nav._filter.setFocus())
+        sc("N", self._toggle_notes_panel)
 
     def keyPressEvent(self, event):
         k = event.key()
@@ -244,8 +271,12 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _open_dirs_dialog(self):
+        # Build flat lists for the dialog from _all_dir_data
+        all_paths   = [d["path"]    for d in self._all_dir_data]
+        all_enabled = [d["enabled"] for d in self._all_dir_data]
         dlg = DirSelectorDialog(
-            current_dirs=[str(d) for d in self._dir_manager.directories],
+            current_dirs=all_paths,
+            current_enabled=all_enabled,
             output_dir=str(self._dir_manager.output_dir)
             if self._dir_manager.output_dir
             else "",
@@ -256,6 +287,7 @@ class MainWindow(QMainWindow):
 
         dirs = dlg.get_input_dirs()
         out = dlg.get_output_dir()
+        self._all_dir_data = dlg.get_all_dir_data()
         self._dir_manager.set_directories(dirs, out or None)
         self._cmp.setup_directories()
         self._load_export_records()          # populate records before first nav
@@ -301,6 +333,8 @@ class MainWindow(QMainWindow):
         self._cmp.load_group(group)
         total = self._dir_manager.group_count()
         self._info_lbl.setText(f"  {group.key}   ({group_index + 1} / {total})  ")
+        # Update note panel for this group
+        self._note_panel.set_group(group.key, self._notes.get(group.key, ""))
 
     def _on_best_changed(self, dir_index: int, path):
         self._best_path = path
@@ -322,8 +356,21 @@ class MainWindow(QMainWindow):
         else:
             self._status.clearMessage()
 
+    def _toggle_notes_panel(self):
+        visible = not self._note_panel.isVisible()
+        self._note_panel.setVisible(visible)
+        self._notes_btn.setStyleSheet(
+            _MODE_BTN_ACTIVE if visible else _MODE_BTN_INACTIVE
+        )
+
+    def _on_note_changed(self, key: str, text: str):
+        if text:
+            self._notes[key] = text
+        else:
+            self._notes.pop(key, None)
+        self._save_notes()
+
     def _on_mode_changed(self, mode: str):
-        """Switch between image and JSON comparison modes."""
         is_json = (mode == "json")
         self._mode_img_btn.setStyleSheet(
             _MODE_BTN_INACTIVE if is_json else _MODE_BTN_ACTIVE
@@ -414,7 +461,13 @@ class MainWindow(QMainWindow):
                 return
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
-            dirs = [d for d in cfg.get("input_dirs", []) if Path(d).is_dir()]
+            # Support new format (dir_data) and legacy format (input_dirs)
+            if "dir_data" in cfg:
+                self._all_dir_data = cfg["dir_data"]
+                dirs = [d["path"] for d in self._all_dir_data if d.get("enabled", True) and Path(d["path"]).is_dir()]
+            else:
+                dirs = [d for d in cfg.get("input_dirs", []) if Path(d).is_dir()]
+                self._all_dir_data = [{"path": d, "enabled": True} for d in dirs]
             out = cfg.get("output_dir", "")
             if not dirs:
                 return
@@ -431,7 +484,7 @@ class MainWindow(QMainWindow):
     def _save_config(self):
         try:
             cfg = {
-                "input_dirs": [str(d) for d in self._dir_manager.directories],
+                "dir_data": self._all_dir_data,
                 "output_dir": str(self._dir_manager.output_dir)
                 if self._dir_manager.output_dir
                 else "",
@@ -441,6 +494,22 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _load_notes(self):
+        try:
+            if NOTES_PATH.exists():
+                with open(NOTES_PATH, "r", encoding="utf-8") as f:
+                    self._notes = json.load(f)
+        except Exception:
+            self._notes = {}
+
+    def _save_notes(self):
+        try:
+            with open(NOTES_PATH, "w", encoding="utf-8") as f:
+                json.dump(self._notes, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+
     def closeEvent(self, event):
+        self._note_panel.flush()
         self._save_config()
         super().closeEvent(event)
