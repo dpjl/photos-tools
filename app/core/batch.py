@@ -228,6 +228,12 @@ class BatchSession:
 # ══════════════════════════════════════════════════════════════════════════════
 # Sidecar recette (fichier source)
 # ══════════════════════════════════════════════════════════════════════════════
+def _mask_has_pixels(mask: Optional[np.ndarray]) -> bool:
+    """Retourne True uniquement si mask est un ndarray contenant au moins un pixel non nul.
+
+    Un tableau all-zeros (masque vide mais alloué) est traité comme 'pas de masque'.
+    """
+    return mask is not None and bool(mask.any())
 
 def save_recipe(config: "BatchImageConfig") -> Optional[str]:
     """Sauvegarde la configuration de restauration («recette») à côté du fichier source.
@@ -249,13 +255,13 @@ def save_recipe(config: "BatchImageConfig") -> Optional[str]:
         "step_params":    config.step_params,
         "wb_pick":        list(config.wb_pick) if config.wb_pick else None,
         "wb_patch_radius": config.wb_patch_radius,
-        "has_mask":       config.inpaint_mask is not None,
+        "has_mask":       _mask_has_pixels(config.inpaint_mask),
     }
     try:
         with open(recipe_path, "w", encoding="utf-8") as f:
             json.dump(recipe, f, ensure_ascii=False, indent=2)
 
-        if config.inpaint_mask is not None:
+        if _mask_has_pixels(config.inpaint_mask):
             mask_path = os.path.join(source_dir, stem + ".mask.png")
             cv2.imwrite(mask_path, config.inpaint_mask)
 
@@ -358,7 +364,7 @@ def save_export_recipe(config: "BatchImageConfig") -> Optional[str]:
             "step_params":    config.step_params,
             "wb_pick":        list(config.wb_pick) if config.wb_pick else None,
             "wb_patch_radius": config.wb_patch_radius,
-            "has_mask":       config.inpaint_mask is not None,
+            "has_mask":       _mask_has_pixels(config.inpaint_mask),
         }
         with open(path, "w", encoding="utf-8") as f:
             json.dump(recipe, f, ensure_ascii=False, indent=2)

@@ -485,7 +485,9 @@ class BatchWindow(QMainWindow):
         cfg.step_order      = self._step_list.get_order()
         cfg.step_enabled    = self._step_list.get_enabled()
         cfg.step_params     = self._step_list.get_all_params()
-        cfg.inpaint_mask    = self._mask_panel.get_mask()
+        # get_mask() retourne toujours un ndarray (meme vide) — normaliser en None si vide
+        raw_mask = self._mask_panel.get_mask()
+        cfg.inpaint_mask    = raw_mask if (raw_mask is not None and raw_mask.any()) else None
         cfg.wb_pick         = self._wb_panel.get_pick_point()
         cfg.wb_patch_radius = self._wb_panel.get_patch_radius()
         save_recipe(cfg)
