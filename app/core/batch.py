@@ -301,22 +301,30 @@ def list_export_recipes(file_path: str) -> list[tuple[int, str]]:
     """Liste les exports versionnés ``{stem}.export.NNN.json`` à côté de la source.
 
     Retourne ``[(N, chemin_absolu), ...]`` trié par N croissant.
-    Ne retourne que les entrées dont le numéro est valide (entier > 0).
+    Utilise os.scandir (pas glob) pour être robuste face aux caractères spéciaux
+    dans le chemin du répertoire (crochets, points d'interrogation, etc.).
     """
-    import glob
-    source_dir = os.path.dirname(file_path)
-    stem = os.path.splitext(os.path.basename(file_path))[0]
-    pattern = os.path.join(source_dir, f"{stem}.export.*.json")
+    source_dir = os.path.dirname(os.path.abspath(file_path))
+    stem   = os.path.splitext(os.path.basename(file_path))[0]
+    prefix = f"{stem}.export."
+    suffix = ".json"
     result: list[tuple[int, str]] = []
-    for path in glob.glob(pattern):
-        base = os.path.basename(path)
-        try:
-            num_str = base[len(stem) + len(".export.") : -len(".json")]
-            n = int(num_str)
-            if n > 0:
-                result.append((n, path))
-        except (ValueError, IndexError):
-            continue
+    try:
+        for entry in os.scandir(source_dir):
+            if not entry.is_file():
+                continue
+            name = entry.name
+            if not (name.startswith(prefix) and name.endswith(suffix)):
+                continue
+            try:
+                num_str = name[len(prefix) : -len(suffix)]
+                n = int(num_str)
+                if n > 0:
+                    result.append((n, entry.path))
+            except (ValueError, IndexError):
+                continue
+    except OSError:
+        pass
     result.sort(key=lambda x: x[0])
     return result
 
