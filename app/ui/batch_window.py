@@ -460,7 +460,7 @@ class BatchWindow(QMainWindow):
         self._origin_view.set_image(img)
 
         # ── Onglet Résultat (chargement lazeux si onglet actif) ───────────────
-        if self._tabs.currentIndex() == 3:
+        if self._tabs.currentIndex() == 4:
             self._update_dest_view(cfg)
         else:
             self._dest_view.set_image(None)
@@ -1528,11 +1528,7 @@ class BatchWindow(QMainWindow):
                 key="batch_progress",
             )
 
-        # Rafraîchir le dropdown si c'est l'image courante (nouvel export vient d'être créé)
-        if cfg is self._current_cfg:
-            self._refresh_export_dropdown(cfg)
-
-        # Sidecar résultat JSON + image
+        # Sidecar résultat JSON + image (inclut save_export_recipe côté source)
         step_log = build_step_log(
             step_order   = cfg.step_order,
             step_enabled = cfg.step_enabled,
@@ -1545,6 +1541,11 @@ class BatchWindow(QMainWindow):
             self._session.save_result(cfg, result_img, step_log)
         except Exception as exc:
             self._statusbar.showMessage(f"Erreur sauvegarde : {exc}")
+
+        # Rafraîchir le dropdown APRÈS save_result (le .export.NNN.json est maintenant sur disque)
+        if cfg is self._current_cfg:
+            self._refresh_export_dropdown(cfg)
+            self._refresh_if_diff_tab()
 
         self._process_next_batch()
 
