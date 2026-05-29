@@ -108,6 +108,8 @@ class BatchWindow(QMainWindow):
         self._full_preview_worker: Optional[PipelineWorker] = None
         self._preview_full_img:    Optional[np.ndarray]     = None
         self._preview_overlay_step: Optional[str]           = None
+        # Données de l'export actuellement visionné (pour le fast-preview en lecture seule)
+        self._viewed_export_data:  Optional[dict]           = None
 
         self._build_ui()
         self._apply_theme()
@@ -866,28 +868,52 @@ class BatchWindow(QMainWindow):
         if self._current_orig is None or self._current_cfg is None:
             return
         self._inject_instance_state(self._current_cfg)
-        img = self._compute_single_profile_preview()
+        # En mode export lecture seule : utiliser les données de l'export directement
+        # (pas les panels qui peuvent être disabled, ni _current_cfg qui n'a pas changé)
+        if self._is_viewing_export and self._viewed_export_data is not None:
+            data = self._viewed_export_data
+            img = self._compute_single_profile_preview(
+                step_order   = data.get("step_order"),
+                step_enabled = data.get("step_enabled"),
+                step_params  = data.get("step_params"),
+            )
+        else:
+            img = self._compute_single_profile_preview()
         if img is not None:
             self._refresh_panels(img)
 
-    def _compute_single_profile_preview(self) -> Optional[np.ndarray]:
-        """Exécute les fast steps pour le profil courant (une seule passe)."""
+    def _compute_single_profile_preview(
+        self,
+        step_order:   Optional[list] = None,
+        step_enabled: Optional[dict] = None,
+        step_params:  Optional[dict] = None,
+    ) -> Optional[np.ndarray]:
+        """Exécute les fast steps pour le profil courant (une seule passe).
+
+        step_order / step_enabled / step_params : override optionnel (mode export).
+        Quand step_params est fourni, il est utilisé à la place de panel.get_params().
+        """
         cfg = self._current_cfg
         if cfg is None or self._current_orig is None:
             return None
+        _order   = step_order   if step_order   is not None else cfg.step_order
+        _enabled = step_enabled if step_enabled is not None else cfg.step_enabled
         out = self._current_orig.copy()
         ctx: dict = {}
-        for sid in cfg.step_order:
+        for sid in _order:
             if sid not in _FAST_PREVIEW_IDS:
                 continue
-            if not cfg.step_enabled.get(sid, True):
+            if not _enabled.get(sid, True):
                 continue
             step  = self._steps_by_id.get(sid)
             panel = self._step_list.get_panel(sid)
             if step is None or panel is None:
                 continue
+            # Paramètres : depuis l'override ou depuis le panel
+            params = (step_params.get(sid) if step_params is not None and sid in step_params
+                      else panel.get_params())
             try:
-                result, extras = step.process(out, panel.get_params(), ctx)
+                result, extras = step.process(out, params, ctx)
                 out = result
                 ctx.update(extras)
             except Exception:
@@ -1196,6 +1222,7 @@ class BatchWindow(QMainWindow):
             # ── Retour en mode édition ────────────────────────────────────
             self._is_viewing_export  = False
             self._viewed_export_path = None
+            self._viewed_export_data = None
             self._step_list.setEnabled(True)
             self._restore_export_btn.setVisible(False)
             # Réafficher la config courante dans l'UI
@@ -1231,6 +1258,7 @@ class BatchWindow(QMainWindow):
                 return
             self._is_viewing_export  = True
             self._viewed_export_path = path
+            self._viewed_export_data = data
             # Appliquer dans l'UI sans toucher _current_cfg
             self._applying_order       = True
             self._applying_export_view = True
