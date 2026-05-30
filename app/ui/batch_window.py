@@ -52,6 +52,17 @@ from ui.param_history import SetParamCommand, PropagateParamCommand, PropagateEn
 _FAST_PREVIEW_IDS = frozenset({"color", "facehighlight", "ddcolor_lut", "autocolor", "wb",
                                "lightleak", "rembg"})
 
+# Indices d'onglets nommés
+_TAB_PREVIEW  = 0
+_TAB_MASK     = 1
+_TAB_WB       = 2
+_TAB_REDEYE   = 3
+_TAB_ORIGIN   = 4
+_TAB_RESULT   = 5
+_TAB_DIFF     = 6
+# Onglets où l'aperçu rapide est calculé à chaque changement de paramètre
+_PREVIEW_TABS = frozenset({_TAB_PREVIEW, _TAB_MASK, _TAB_WB, _TAB_REDEYE})
+
 
 class BatchWindow(QMainWindow):
     """Fenêtre de traitement par lots."""
@@ -110,6 +121,10 @@ class BatchWindow(QMainWindow):
         self._preview_overlay_step: Optional[str]           = None
         # Données de l'export actuellement visionné (pour le fast-preview en lecture seule)
         self._viewed_export_data:  Optional[dict]           = None
+        # Flag : True → l'aperçu doit être recalculé (param/image changé)
+        self._preview_stale:       bool                     = True
+        # Dernière image d'aperçu rapide calculée (pour ré-affichage inter-onglets)
+        self._last_fast_preview:   Optional[np.ndarray]     = None
 
         self._build_ui()
         self._apply_theme()
@@ -336,6 +351,8 @@ class BatchWindow(QMainWindow):
         self._wb_panel   = WBPickerPanel(
             _dummy, None, show_ok_cancel=False, sidebar_width=_SIDEBAR_W
         )
+        self._redeye_panel = MaskCanvasPanel(_dummy, None, show_ok_cancel=False,
+                                              sidebar_width=_SIDEBAR_W)
         # Onglets d'aperçu image (zoom/pan via SyncedImageView)
         self._origin_view = SyncedImageView()
         self._dest_view   = SyncedImageView()
@@ -381,16 +398,17 @@ class BatchWindow(QMainWindow):
         pw_lay.addWidget(self._preview_view, stretch=1)
         pw_lay.addWidget(preview_sidebar)
 
-        self._tabs.addTab(preview_wrapper,                                "Preview")   # 0
-        self._tabs.addTab(self._mask_panel,                               "Masque")    # 1
-        self._tabs.addTab(self._wb_panel,                                 "Blanc")     # 2
-        self._tabs.addTab(self._wrap_with_sidebar(self._origin_view, _SIDEBAR_W), "Originale")  # 3
-        self._tabs.addTab(self._wrap_with_sidebar(self._dest_view,   _SIDEBAR_W), "Résultat")   # 4
+        self._tabs.addTab(preview_wrapper,                                "Preview")       # _TAB_PREVIEW
+        self._tabs.addTab(self._mask_panel,                               "Masque")        # _TAB_MASK
+        self._tabs.addTab(self._wb_panel,                                 "Blanc")         # _TAB_WB
+        self._tabs.addTab(self._redeye_panel,                             "Yeux rouges")   # _TAB_REDEYE
+        self._tabs.addTab(self._wrap_with_sidebar(self._origin_view, _SIDEBAR_W), "Originale")  # _TAB_ORIGIN
+        self._tabs.addTab(self._wrap_with_sidebar(self._dest_view,   _SIDEBAR_W), "Résultat")   # _TAB_RESULT
 
         # Onglets diff JSON
         self._diff_source_panel = JsonDiffPanel()
         self._diff_source_panel.set_refresh_fn(self._refresh_diff_source)
-        self._tabs.addTab(self._diff_source_panel, "Δ Exports")   # 5
+        self._tabs.addTab(self._diff_source_panel, "Δ Exports")   # _TAB_DIFF
         self._tabs.currentChanged.connect(self._on_tab_changed)
         rl.addWidget(self._tabs)
 
@@ -436,6 +454,9 @@ class BatchWindow(QMainWindow):
         # Réinitialiser le zoom partagé → chaque nouvelle image commence au fit
         self._shared_zoom = None
         self._current_cfg = cfg
+        self._preview_stale = True
+        self._preview_full_img = None
+        self._last_fast_preview = None
 
         # ── Image originale ───────────────────────────────────────────────────
         img = cv2.imread(cfg.file_path, cv2.IMREAD_COLOR)
@@ -459,12 +480,13 @@ class BatchWindow(QMainWindow):
             display = result if result is not None else img
             self._mask_panel.set_image(display, cfg.inpaint_mask)
             self._wb_panel.set_image(display, cfg.wb_pick, cfg.wb_patch_radius)
+            self._redeye_panel.set_image(display, cfg.redeye_mask)
 
         # ── Onglet Originale ──────────────────────────────────────────────────
         self._origin_view.set_image(img)
 
         # ── Onglet Résultat (chargement lazeux si onglet actif) ───────────────
-        if self._tabs.currentIndex() == 4:
+        if self._tabs.currentIndex() == _TAB_RESULT:
             self._update_dest_view(cfg)
         else:
             self._dest_view.set_image(None)
@@ -489,11 +511,7 @@ class BatchWindow(QMainWindow):
         cfg.step_order      = self._step_list.get_order()
         cfg.step_enabled    = self._step_list.get_enabled()
         cfg.step_params     = self._step_list.get_all_params()
-        # get_mask() retourne toujours un ndarray (meme vide) — normaliser en None si vide
-        raw_mask = self._mask_panel.get_mask()
-        cfg.inpaint_mask    = raw_mask if (raw_mask is not None and raw_mask.any()) else None
-        cfg.wb_pick         = self._wb_panel.get_pick_point()
-        cfg.wb_patch_radius = self._wb_panel.get_patch_radius()
+        self._sync_editor_state()
         save_recipe(cfg)
         # Vider la pile undo : chaque image a sa propre histoire de changements
         self._undo_stack.clear()
@@ -743,38 +761,42 @@ class BatchWindow(QMainWindow):
     @pyqtSlot(str)
     def _on_mask_edit_requested(self, step_id: str) -> None:
         """Bascule sur l'onglet Masque."""
-        self._tabs.setCurrentIndex(0)
+        self._tabs.setCurrentIndex(_TAB_MASK)
 
     @pyqtSlot(str)
     def _on_color_picker_requested(self, step_id: str) -> None:
         """Bascule sur l'onglet Blanc."""
-        self._tabs.setCurrentIndex(1)
+        self._tabs.setCurrentIndex(_TAB_WB)
 
     def _undo(self) -> None:
         """Ctrl+Z : route vers le bon gestionnaire selon l'onglet actif."""
         idx = self._tabs.currentIndex()
-        if idx == 0:    # Masque
+        if idx == _TAB_MASK:
             self._mask_panel._canvas.undo()
-        elif idx == 1:  # Blanc
+        elif idx == _TAB_WB:
             self._wb_panel._canvas.undo()
             # Sync cfg.wb_pick : undo() ne peut pas émettre pick_changed(None)
             if self._current_cfg:
                 self._current_cfg.wb_pick = self._wb_panel._canvas._pick_pt
             self._schedule_preview_update()
+        elif idx == _TAB_REDEYE:
+            self._redeye_panel._canvas.undo()
         else:
             self._undo_stack.undo()
 
     def _redo(self) -> None:
         """Ctrl+Y : route vers le bon gestionnaire selon l'onglet actif."""
         idx = self._tabs.currentIndex()
-        if idx == 0:    # Masque
+        if idx == _TAB_MASK:
             self._mask_panel._canvas.redo()
-        elif idx == 1:  # Blanc
+        elif idx == _TAB_WB:
             self._wb_panel._canvas.redo()
             # Sync cfg.wb_pick après redo
             if self._current_cfg:
                 self._current_cfg.wb_pick = self._wb_panel._canvas._pick_pt
             self._schedule_preview_update()
+        elif idx == _TAB_REDEYE:
+            self._redeye_panel._canvas.redo()
         else:
             self._undo_stack.redo()
 
@@ -808,22 +830,27 @@ class BatchWindow(QMainWindow):
         from PyQt6.QtCore import QTimer
 
         # 1. Sauvegarder le zoom de l'onglet qu'on quitte (seulement si actif et visible)
-        prev_canvas = self._get_tab_canvas(self._prev_tab_index)
+        prev = self._prev_tab_index
+        prev_canvas = self._get_tab_canvas(prev)
         if prev_canvas is not None and hasattr(prev_canvas, "get_zoom_state"):
             state = prev_canvas.get_zoom_state()
             if state[0] > 0:  # état valide
                 self._shared_zoom = state
         self._prev_tab_index = index
 
-        # 2. Charger le résultat si besoin (AVANT d'appliquer le zoom)
-        if index == 4 and self._current_cfg is not None:
+        # 2. Sync éditeurs → cfg en mémoire quand on quitte un onglet éditeur
+        if prev in (_TAB_MASK, _TAB_WB, _TAB_REDEYE):
+            self._sync_editor_state()
+
+        # 3. Charger le résultat si besoin (AVANT d'appliquer le zoom)
+        if index == _TAB_RESULT and self._current_cfg is not None:
             self._update_dest_view(self._current_cfg)
 
-        # 3. Actualiser les onglets diff
-        if index == 5:
+        # 4. Actualiser les onglets diff
+        if index == _TAB_DIFF:
             self._refresh_diff_source()
 
-        # 4. Appliquer le zoom au nouveau canvas, différé après le layout Qt
+        # 5. Appliquer le zoom au nouveau canvas, différé après le layout Qt
         #    (set_image appelle fit_in_view → sans différé, le zoom serait écrasé)
         zoom = self._shared_zoom
         if zoom is not None:
@@ -833,19 +860,23 @@ class BatchWindow(QMainWindow):
                     0, lambda c=new_canvas, z=zoom: c.apply_zoom_state(*z)
                 )
 
-        self._schedule_preview_update()
+        # 6. Recalculer l'aperçu seulement si nécessaire
+        if self._preview_stale:
+            self._schedule_preview_update()
 
     def _get_tab_canvas(self, index: int):
-        """Retourne le canvas zôomable de l'onglet (index 0–4) ou None."""
-        if index == 0:
+        """Retourne le canvas zôomable de l'onglet ou None."""
+        if index == _TAB_PREVIEW:
             return self._preview_view
-        if index == 1:
+        if index == _TAB_MASK:
             return self._mask_panel._canvas
-        if index == 2:
+        if index == _TAB_WB:
             return self._wb_panel._canvas
-        if index == 3:
+        if index == _TAB_REDEYE:
+            return self._redeye_panel._canvas
+        if index == _TAB_ORIGIN:
             return self._origin_view
-        if index == 4:
+        if index == _TAB_RESULT:
             return self._dest_view
         return None
 
@@ -853,12 +884,15 @@ class BatchWindow(QMainWindow):
         """Lance le timer debounce (300 ms) pour mettre à jour l'aperçu."""
         if self._current_orig is None:
             return
+        self._preview_stale = True
         self._preview_timer.start()
 
     def _do_preview_update(self) -> None:
-        """Calcule le fast-pipeline si l'onglet actif est Preview, Masque ou Blanc."""
+        """Calcule le fast-pipeline si l'onglet actif est éligible et que l'aperçu est périmé."""
+        if not self._preview_stale:
+            return
         idx = self._tabs.currentIndex()
-        if idx in (0, 1, 2):  # Preview, Masque, Blanc
+        if idx in _PREVIEW_TABS:
             self._compute_and_show_fast_preview()
 
     # ── Aperçu rapide (tabs Masque / Blanc) ───────────────────────────────────
@@ -867,6 +901,7 @@ class BatchWindow(QMainWindow):
         """Calcule le fast-pipeline pour le profil courant et met à jour les panneaux."""
         if self._current_orig is None or self._current_cfg is None:
             return
+        self._sync_editor_state()
         self._inject_instance_state(self._current_cfg)
         # En mode export lecture seule : utiliser les données de l'export directement
         # (pas les panels qui peuvent être disabled, ni _current_cfg qui n'a pas changé)
@@ -921,9 +956,9 @@ class BatchWindow(QMainWindow):
         return out
 
     def _refresh_panels(self, img: np.ndarray) -> None:
-        """Met à jour les panneaux Masque, Blanc et Preview avec l'image fournie.
+        """Met à jour les panneaux Masque, Blanc, Yeux rouges et Preview.
 
-        Utilise uniquement set_display_image sur les canvases masque/WB pour
+        Utilise uniquement set_display_image sur les canvases éditeurs pour
         préserver le masque, le point WB et le zoom en cours.
         Le preview view est mis à jour directement (affichage fast-preview).
         """
@@ -931,8 +966,11 @@ class BatchWindow(QMainWindow):
             return
         self._mask_panel._canvas.set_display_image(img)
         self._wb_panel._canvas.set_display_image(img)
+        self._redeye_panel._canvas.set_display_image(img)
         # Preview : afficher le fast-preview (invalide le full-preview)
         self._preview_full_img = None
+        self._last_fast_preview = img
+        self._preview_stale = False
         self._preview_view.set_image(img)
         self._preview_status_lbl.setText("Preview rapide")
 
@@ -1050,7 +1088,7 @@ class BatchWindow(QMainWindow):
 
     def _refresh_if_diff_tab(self) -> None:
         """Actualise le panneau diff si l'onglet actif est l'onglet Δ Exports."""
-        if self._tabs.currentIndex() == 5:
+        if self._tabs.currentIndex() == _TAB_DIFF:
             self._refresh_diff_source()
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -1075,6 +1113,7 @@ class BatchWindow(QMainWindow):
         self._preview_full_img = None
         self._full_preview_btn.setEnabled(False)
         self._preview_status_lbl.setText("⏳ Calcul...")
+        self._sync_editor_state()
         self._inject_instance_state(cfg)
 
         enabled_order = [sid for sid in cfg.step_order if cfg.step_enabled.get(sid, True)]
@@ -1107,10 +1146,16 @@ class BatchWindow(QMainWindow):
             self._current_cfg.context.update(entry.context)
 
         self._preview_full_img = result_img
+        self._preview_stale = False
+        self._last_fast_preview = None   # le full preview prime
         self._full_preview_btn.setEnabled(True)
 
         if result_img is not None:
             self._preview_status_lbl.setText("Preview complet")
+            # Mettre à jour tous les panneaux éditeurs avec l'image du full preview
+            self._mask_panel._canvas.set_display_image(result_img)
+            self._wb_panel._canvas.set_display_image(result_img)
+            self._redeye_panel._canvas.set_display_image(result_img)
             # Appliquer l'overlay si actif, sinon afficher directement
             if self._preview_overlay_step:
                 overlay = self._build_overlay_img(result_img)
@@ -1551,7 +1596,8 @@ class BatchWindow(QMainWindow):
                 # set_display_image préserve masque, WB et zoom en cours
                 self._mask_panel._canvas.set_display_image(result_img)
                 self._wb_panel._canvas.set_display_image(result_img)
-                if self._tabs.currentIndex() == 4:
+                self._redeye_panel._canvas.set_display_image(result_img)
+                if self._tabs.currentIndex() == _TAB_RESULT:
                     self._dest_view.set_image(result_img)
             # result_img n'est pas stocké dans cfg — libéré après écriture disque.
 
@@ -1604,6 +1650,18 @@ class BatchWindow(QMainWindow):
             self._mask_panel.set_image(result, cfg.inpaint_mask)
             self._wb_panel.set_image(result, cfg.wb_pick, cfg.wb_patch_radius)
 
+    def _sync_editor_state(self) -> None:
+        """Copie l'état des panneaux éditeurs dans _current_cfg (mémoire, pas disque)."""
+        cfg = self._current_cfg
+        if cfg is None:
+            return
+        raw_mask = self._mask_panel.get_mask()
+        cfg.inpaint_mask = raw_mask if (raw_mask is not None and raw_mask.any()) else None
+        raw_redeye = self._redeye_panel.get_mask()
+        cfg.redeye_mask = raw_redeye if (raw_redeye is not None and raw_redeye.any()) else None
+        cfg.wb_pick = self._wb_panel.get_pick_point()
+        cfg.wb_patch_radius = self._wb_panel.get_patch_radius()
+
     def _inject_instance_state(self, cfg: BatchImageConfig) -> None:
         """Injecte le masque et le point WB dans les singletons d'étapes."""
         inpaint_step = self._steps_by_id.get("inpaint")
@@ -1612,6 +1670,13 @@ class BatchWindow(QMainWindow):
                 inpaint_step.set_mask(cfg.inpaint_mask)
             else:
                 inpaint_step.clear_mask()
+
+        redeye_step = self._steps_by_id.get("redeye")
+        if redeye_step and hasattr(redeye_step, "set_redeye_mask"):
+            if cfg.redeye_mask is not None:
+                redeye_step.set_redeye_mask(cfg.redeye_mask)
+            else:
+                redeye_step.clear_redeye_mask()
 
         wb_step = self._steps_by_id.get("wb")
         if wb_step and hasattr(wb_step, "set_pick_point"):
@@ -1625,6 +1690,9 @@ class BatchWindow(QMainWindow):
         inpaint_step = self._steps_by_id.get("inpaint")
         if inpaint_step and hasattr(inpaint_step, "clear_mask"):
             inpaint_step.clear_mask()
+        redeye_step = self._steps_by_id.get("redeye")
+        if redeye_step and hasattr(redeye_step, "clear_redeye_mask"):
+            redeye_step.clear_redeye_mask()
         wb_step = self._steps_by_id.get("wb")
         if wb_step and hasattr(wb_step, "clear_pick_point"):
             wb_step.clear_pick_point()

@@ -62,14 +62,26 @@ class RedEyeStep(StepBase):
         {"key": "profil", "label": "Profil", "type": "choice",
          "as_buttons": True,
          "default": "étendu",
-         "choices": ["classique", "étendu"]},
+         "choices": ["classique", "étendu", "manuel"]},
         {"key": "strength", "label": "Force correction", "type": "float",
          "default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05},
     ]
 
     def __init__(self):
-        self._face_helper = None
-        self._landmarker  = None
+        self._face_helper  = None
+        self._landmarker   = None
+        self._redeye_mask: np.ndarray | None = None  # masque peint (mode manuel)
+
+    # ── API masque yeux rouges (appelée depuis l'UI) ──────────────────────────
+
+    def set_redeye_mask(self, mask: np.ndarray | None) -> None:
+        self._redeye_mask = mask.copy() if mask is not None else None
+
+    def get_redeye_mask(self) -> np.ndarray | None:
+        return self._redeye_mask
+
+    def clear_redeye_mask(self) -> None:
+        self._redeye_mask = None
 
     # ── Lazy loaders ─────────────────────────────────────────────────────────
 
@@ -112,6 +124,10 @@ class RedEyeStep(StepBase):
         strength = float(params.get("strength", 1.0))
         profil   = str(params.get("profil", "étendu"))
         img_h, img_w = img.shape[:2]
+
+        # ── Mode manuel : appliquer la correction sur le masque peint ─────────
+        if profil == "manuel":
+            return self._process_manual(img, strength)
 
         # ── Détection des visages via RetinaFace ──────────────────────────────
         faces = _detect_faces_retina(img, self._get_face_helper())
@@ -166,6 +182,28 @@ class RedEyeStep(StepBase):
                     })
 
         return result, {"redeye_detections": detections}
+
+    def _process_manual(self, img: np.ndarray, strength: float):
+        """Mode manuel : correction des pixels marqués dans le masque peint."""
+        if self._redeye_mask is None or not self._redeye_mask.any():
+            return img.copy(), {"redeye_detections": []}
+
+        h, w = img.shape[:2]
+        mask = self._redeye_mask
+        if mask.shape[:2] != (h, w):
+            mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
+
+        result = _correct_pixels_gaussian(
+            img.copy(), mask,
+            iris_center_xy=np.array([0.0, 0.0]),  # non utilisé (centroïde auto)
+            iris_radius=max(h, w),                 # pas de cutoff
+            strength=strength,
+        )
+        red_px = int((mask > 0).sum())
+        return result, {"redeye_detections": [{
+            "iris": (w / 2.0, h / 2.0, 0.0),
+            "corrected": red_px > 0,
+        }]}
 
 
 # ── Détection visages ─────────────────────────────────────────────────────────

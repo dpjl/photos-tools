@@ -42,8 +42,9 @@ class BatchImageConfig:
     step_enabled:    dict[str, bool]     = field(default_factory=dict)
     step_params:     dict[str, dict]     = field(default_factory=dict)
 
-    # État des étapes avec état instance (inpaint / WB)
+    # État des étapes avec état instance (inpaint / WB / redeye)
     inpaint_mask:    Optional[np.ndarray] = field(default=None, repr=False)
+    redeye_mask:     Optional[np.ndarray] = field(default=None, repr=False)
     wb_pick:         Optional[tuple[int, int]] = None
     wb_patch_radius: int = 5
 
@@ -69,6 +70,7 @@ class BatchImageConfig:
             step_enabled    = dict(self.step_enabled),
             step_params     = {k: dict(v) for k, v in self.step_params.items()},
             inpaint_mask    = self.inpaint_mask.copy() if self.inpaint_mask is not None else None,
+            redeye_mask     = self.redeye_mask.copy() if self.redeye_mask is not None else None,
             wb_pick         = self.wb_pick,
             wb_patch_radius = self.wb_patch_radius,
             customized      = self.customized,
@@ -128,6 +130,7 @@ class BatchSession:
             e for e in os.listdir(path)
             if os.path.splitext(e)[1].lower() in IMAGE_EXTENSIONS
             and not e.endswith(".mask.png")
+            and not e.endswith(".redeye_mask.png")
         )
         self.images = []
         for e in entries:
@@ -171,6 +174,7 @@ class BatchSession:
         config.step_enabled    = dict(d.step_enabled)
         config.step_params     = {k: dict(v) for k, v in d.step_params.items()}
         config.inpaint_mask    = None
+        config.redeye_mask     = None
         config.wb_pick         = None
         config.wb_patch_radius = d.wb_patch_radius
         config.customized      = False
@@ -256,6 +260,7 @@ def save_recipe(config: "BatchImageConfig") -> Optional[str]:
         "wb_pick":        list(config.wb_pick) if config.wb_pick else None,
         "wb_patch_radius": config.wb_patch_radius,
         "has_mask":       _mask_has_pixels(config.inpaint_mask),
+        "has_redeye_mask": _mask_has_pixels(config.redeye_mask),
     }
     try:
         with open(recipe_path, "w", encoding="utf-8") as f:
@@ -264,6 +269,10 @@ def save_recipe(config: "BatchImageConfig") -> Optional[str]:
         if _mask_has_pixels(config.inpaint_mask):
             mask_path = os.path.join(source_dir, stem + ".mask.png")
             cv2.imwrite(mask_path, config.inpaint_mask)
+
+        if _mask_has_pixels(config.redeye_mask):
+            redeye_path = os.path.join(source_dir, stem + ".redeye_mask.png")
+            cv2.imwrite(redeye_path, config.redeye_mask)
 
         return recipe_path
     except Exception:
@@ -292,6 +301,13 @@ def load_recipe(file_path: str) -> Optional[dict]:
                 mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
                 if mask is not None:
                     data["_mask"] = mask
+
+        if data.get("has_redeye_mask"):
+            redeye_path = os.path.join(source_dir, stem + ".redeye_mask.png")
+            if os.path.exists(redeye_path):
+                rmask = cv2.imread(redeye_path, cv2.IMREAD_GRAYSCALE)
+                if rmask is not None:
+                    data["_redeye_mask"] = rmask
 
         return data
     except Exception:
@@ -408,6 +424,8 @@ def _apply_recipe(config: "BatchImageConfig", recipe: dict) -> None:
     config.customized = bool(recipe.get("customized", False))
     if "_mask" in recipe:
         config.inpaint_mask = recipe["_mask"]
+    if "_redeye_mask" in recipe:
+        config.redeye_mask = recipe["_redeye_mask"]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
