@@ -43,6 +43,12 @@ _UPSCALE         = 3        # upscale fixe avant MediaPipe (optimal)
 _RIGHT_IRIS = [469, 470, 471, 472]
 _LEFT_IRIS  = [474, 475, 476, 477]
 
+# Contours de l'oeil (paupières) pour le profil étendu
+_RIGHT_EYE_CONTOUR = [33, 246, 161, 160, 159, 158, 157, 173,
+                      133, 155, 154, 153, 145, 144, 163, 7]
+_LEFT_EYE_CONTOUR  = [263, 466, 388, 387, 386, 385, 384, 398,
+                      362, 382, 381, 380, 374, 373, 390, 249]
+
 
 class RedEyeStep(StepBase):
     id                 = "redeye"
@@ -53,6 +59,10 @@ class RedEyeStep(StepBase):
     has_overlay        = True
 
     param_defs = [
+        {"key": "profil", "label": "Profil", "type": "choice",
+         "as_buttons": True,
+         "default": "étendu",
+         "choices": ["classique", "étendu"]},
         {"key": "strength", "label": "Force correction", "type": "float",
          "default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05},
     ]
@@ -100,6 +110,7 @@ class RedEyeStep(StepBase):
 
     def process(self, img: np.ndarray, params: dict, context: dict):
         strength = float(params.get("strength", 1.0))
+        profil   = str(params.get("profil", "étendu"))
         img_h, img_w = img.shape[:2]
 
         # ── Détection des visages via RetinaFace ──────────────────────────────
@@ -116,6 +127,7 @@ class RedEyeStep(StepBase):
 
                 corrected_crop, eye_infos = _process_face_crop(
                     crop, self._get_landmarker(), _UPSCALE, strength,
+                    profil,
                 )
 
                 if any(d["corrected"] for d in eye_infos):
@@ -134,7 +146,7 @@ class RedEyeStep(StepBase):
         else:
             # Fallback 1 : MediaPipe sur l'image entière (upscale=1)
             corrected_full, eye_infos = _process_face_crop(
-                img, self._get_landmarker(), 1, strength,
+                img, self._get_landmarker(), 1, strength, profil,
             )
             if any(d["corrected"] for d in eye_infos):
                 result = corrected_full
@@ -200,7 +212,7 @@ def _expand_box(x1, y1, x2, y2, img_w, img_h, margin=_EXPAND_MARGIN):
 
 # ── Traitement d'un crop visage ───────────────────────────────────────────────
 
-def _process_face_crop(crop_bgr, landmarker, upscale, strength):
+def _process_face_crop(crop_bgr, landmarker, upscale, strength, profil="étendu"):
     """Détecte et corrige les yeux rouges dans un crop visage.
 
     Retourne (corrected_crop, eye_infos) où eye_infos est une liste de :
@@ -229,8 +241,14 @@ def _process_face_crop(crop_bgr, landmarker, upscale, strength):
     corrected_up = up_bgr.copy()
     eye_infos    = []
 
+    use_extended = (profil == "étendu")
+
     for landmarks in lm_result.face_landmarks[:1]:
-        for eye_name, iris_indices in (("right", _RIGHT_IRIS), ("left", _LEFT_IRIS)):
+        eye_defs = (
+            ("right", _RIGHT_IRIS, _RIGHT_EYE_CONTOUR),
+            ("left",  _LEFT_IRIS,  _LEFT_EYE_CONTOUR),
+        )
+        for eye_name, iris_indices, eye_contour_indices in eye_defs:
             iris_mask, iris_points = _iris_mask_from_landmarks(
                 corrected_up.shape, landmarks, iris_indices,
             )
@@ -244,7 +262,13 @@ def _process_face_crop(crop_bgr, landmarker, upscale, strength):
             iris_h   = pts_f[:, 1].max() - pts_f[:, 1].min()
             iris_r   = max(_MIN_IRIS_R * upscale, (iris_w + iris_h) / 4.0)
 
-            corr_mask, stats = _red_eye_mask(corrected_up, iris_mask, iris_points)
+            if use_extended:
+                corr_mask, stats = _red_eye_mask_extended(
+                    corrected_up, landmarks, iris_indices, eye_contour_indices,
+                    iris_points, upscale,
+                )
+            else:
+                corr_mask, stats = _red_eye_mask(corrected_up, iris_mask, iris_points)
 
             is_red = (
                 stats["red_pixels"] >= _MIN_RED_PIXELS
@@ -254,9 +278,15 @@ def _process_face_crop(crop_bgr, landmarker, upscale, strength):
 
             corrected = False
             if is_red:
-                corrected_up = _correct_pixels_gaussian(
-                    corrected_up, corr_mask, center, iris_r, strength,
-                )
+                if use_extended:
+                    corrected_up = _correct_pixels_smooth(
+                        corrected_up, corr_mask, iris_points,
+                        eye_contour_indices, landmarks, iris_r, strength,
+                    )
+                else:
+                    corrected_up = _correct_pixels_gaussian(
+                        corrected_up, corr_mask, center, iris_r, strength,
+                    )
                 corrected = True
 
             eye_infos.append({
@@ -396,6 +426,186 @@ def _correct_pixels_gaussian(img_bgr, mask, iris_center_xy, iris_radius, strengt
 
     # Double condition : rouge ET proche du centre
     alpha = np.clip(gauss * red_float * strength, 0.0, 1.0)
+
+    R_nat = (g_f + b_f) * 0.5
+    R_new = r_f * (1.0 - alpha) + R_nat * alpha
+
+    return cv2.merge([
+        b_f.astype(np.uint8),
+        g_f.astype(np.uint8),
+        np.clip(R_new, 0, 255).astype(np.uint8),
+    ])
+
+
+# ── Profil étendu : zone élargie + centralité ────────────────────────────────
+
+_EXPAND_IRIS = 1.8   # facteur d'expansion de l'iris pour la zone de recherche
+
+def _lm_points(landmarks, indices, w, h):
+    """Extrait les coordonnées pixel d'un ensemble de landmarks."""
+    return np.array(
+        [(int(round(landmarks[i].x * w)), int(round(landmarks[i].y * h)))
+         for i in indices if i < len(landmarks)],
+        dtype=np.int32,
+    )
+
+
+def _red_eye_mask_extended(img_bgr, landmarks, iris_indices, eye_contour_indices,
+                           iris_points, upscale):
+    """Masque rouge étendu : zone élargie ∩ contour oeil + centralité.
+
+    Différences par rapport à _red_eye_mask :
+      · zone = iris × 1.8 ∩ polygone paupières (au lieu de iris seul + dist)
+      · morpho close 5×5 pour connecter les fragments
+      · seules les composantes connectées au tiers central de l'iris sont gardées
+    """
+    h, w = img_bgr.shape[:2]
+
+    pts_f       = iris_points.astype(np.float32)
+    center      = pts_f.mean(axis=0)
+    iris_w      = pts_f[:, 0].max() - pts_f[:, 0].min()
+    iris_h      = pts_f[:, 1].max() - pts_f[:, 1].min()
+    rx          = max(int(iris_w / 2), 2)
+    ry          = max(int(iris_h / 2), 2)
+    iris_radius = max(2.0, (iris_w + iris_h) / 4.0)
+
+    # Zone de recherche : iris élargi ∩ contour oeil
+    erx, ery   = int(rx * _EXPAND_IRIS), int(ry * _EXPAND_IRIS)
+    search_r   = iris_radius * _EXPAND_IRIS
+    center_int = tuple(center.astype(int))
+
+    search_mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.ellipse(search_mask, center_int, (erx, ery), 0, 0, 360, 255, -1)
+
+    eye_pts = _lm_points(landmarks, eye_contour_indices, w, h)
+    eye_mask = None
+    if len(eye_pts) >= 6:
+        eye_mask = np.zeros((h, w), dtype=np.uint8)
+        cv2.fillPoly(eye_mask, [eye_pts], 255)
+        search_mask = cv2.bitwise_and(search_mask, eye_mask)
+
+    # Filtres couleur identiques au profil classique
+    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+    r_f = img_bgr[:, :, 2].astype(np.float32)
+    g_f = img_bgr[:, :, 1].astype(np.float32)
+    b_f = img_bgr[:, :, 0].astype(np.float32)
+    redness = r_f - 0.55 * g_f - 0.45 * b_f
+
+    red_hue = cv2.bitwise_or(
+        cv2.inRange(hsv, np.array([0,   45, 30]), np.array([12,  255, 255])),
+        cv2.inRange(hsv, np.array([168, 45, 30]), np.array([180, 255, 255])),
+    )
+
+    candidate = (
+        (red_hue > 0)
+        & (redness > 25)
+        & (r_f > 65)
+        & (r_f > g_f * 1.25)
+        & (r_f > b_f * 1.25)
+        & (search_mask > 0)
+    )
+
+    mask   = candidate.astype(np.uint8) * 255
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    mask   = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    mask   = cv2.morphologyEx(
+        mask, cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
+    )
+
+    # Seed au tiers central de l'iris
+    seed_rx = max(int(rx / 3), 2)
+    seed_ry = max(int(ry / 3), 2)
+    central_seed = np.zeros((h, w), dtype=np.uint8)
+    cv2.ellipse(central_seed, center_int, (seed_rx, seed_ry), 0, 0, 360, 255, -1)
+
+    n, labels, comp_stats, centroids = cv2.connectedComponentsWithStats(mask, 8)
+    final_mask      = np.zeros_like(mask)
+    kept_components = 0
+
+    for lbl in range(1, n):
+        area = comp_stats[lbl, cv2.CC_STAT_AREA]
+        if area < 3:
+            continue
+        if area > np.pi * (search_r ** 2) * 0.85:
+            continue
+        component = (labels == lbl).astype(np.uint8) * 255
+        if cv2.countNonZero(cv2.bitwise_and(component, central_seed)) > 0:
+            final_mask[labels == lbl] = 255
+            kept_components += 1
+
+    final_mask = cv2.morphologyEx(final_mask, cv2.MORPH_OPEN, kernel)
+    if eye_mask is not None:
+        final_mask = cv2.bitwise_and(final_mask, eye_mask)
+
+    search_area = max(1, cv2.countNonZero(search_mask))
+    final_area  = cv2.countNonZero(final_mask)
+
+    return final_mask, {
+        "red_pixels":  int(final_area),
+        "iris_pixels": int(search_area),
+        "red_ratio":   float(final_area / search_area),
+        "components":  int(kept_components),
+    }
+
+
+def _correct_pixels_smooth(img_bgr, mask, iris_points, eye_contour_indices,
+                           landmarks, iris_radius, strength):
+    """Correction avec masque lissé et pondération par redness.
+
+    Le masque binaire est dilaté puis flouté (GaussianBlur) pour une transition
+    douce aux bords.  L'intensité de correction est proportionnelle au score
+    de redness du pixel (les pixels les plus rouges sont corrigés plus fort).
+    """
+    if cv2.countNonZero(mask) < 4:
+        return img_bgr
+
+    h, w = img_bgr.shape[:2]
+
+    # Construire le masque du contour de l'oeil pour borner le lissage
+    eye_pts  = _lm_points(landmarks, eye_contour_indices, w, h)
+    eye_mask = None
+    if len(eye_pts) >= 6:
+        eye_mask = np.zeros((h, w), dtype=np.uint8)
+        cv2.fillPoly(eye_mask, [eye_pts], 255)
+
+    # Dilater + Gaussian blur → transition douce
+    smooth_k    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    smooth_mask = cv2.dilate(mask, smooth_k, iterations=1)
+    if eye_mask is not None:
+        smooth_mask = cv2.bitwise_and(smooth_mask, eye_mask)
+    blur_size = max(3, int(iris_radius * 0.3) | 1)
+    alpha_map = cv2.GaussianBlur(
+        smooth_mask.astype(np.float32) / 255.0,
+        (blur_size, blur_size), 0,
+    )
+    if eye_mask is not None:
+        alpha_map[eye_mask == 0] = 0.0
+
+    total = float(alpha_map.sum())
+    if total < 1.0:
+        return img_bgr
+
+    b_f, g_f, r_f = [c.astype(np.float32) for c in cv2.split(img_bgr)]
+    yy, xx = np.mgrid[:h, :w]
+
+    centroid_x = float((alpha_map * xx).sum() / total)
+    centroid_y = float((alpha_map * yy).sum() / total)
+
+    red_radius = np.sqrt(total / np.pi)
+    sigma = max(float(red_radius), 1.0)
+
+    dist  = np.sqrt((xx - centroid_x) ** 2 + (yy - centroid_y) ** 2)
+    gauss = np.exp(-0.5 * (dist / sigma) ** 2).astype(np.float32)
+
+    # Pondération par redness normalisée
+    redness      = r_f - 0.55 * g_f - 0.45 * b_f
+    redness_pos  = np.clip(redness, 0, None)
+    red_max      = redness_pos[alpha_map > 0.1].max() if (alpha_map > 0.1).any() else 1.0
+    redness_norm = np.clip(redness_pos / max(red_max, 1.0), 0, 1)
+    redness_wt   = 0.6 + 0.4 * redness_norm       # ∈ [0.6, 1.0]
+
+    alpha = np.clip(alpha_map * gauss * redness_wt * strength * 1.2, 0.0, 1.0)
 
     R_nat = (g_f + b_f) * 0.5
     R_new = r_f * (1.0 - alpha) + R_nat * alpha
