@@ -388,6 +388,28 @@ class ExportMosaicView(QWidget):
             )
         self._stack.setCurrentIndex(1)
 
+    def switch_to_entry(self, entry: ExportEntry):
+        """Bascule vers un export donné (fullscreen si déjà en fullscreen, sinon sélection)."""
+        # Mettre à jour la sélection dans la mosaïque
+        self._selected_entry = entry
+        for tile in self._tiles:
+            tile.set_selected(tile.entry.index == entry.index)
+
+        if self.is_fullscreen():
+            # Remplacer l'image en plein format en préservant le zoom
+            img = cv2.imread(entry.image_path, cv2.IMREAD_COLOR)
+            if img is None:
+                return
+            zoom_state = self._full_view.get_zoom_state()
+            self._fullscreen_entry = entry
+            self._full_view.set_image(img)
+            if zoom_state and zoom_state[0] > 0:
+                QTimer.singleShot(
+                    0, lambda z=zoom_state: self._full_view.apply_zoom_state(*z)
+                )
+        else:
+            self.export_selected.emit(entry)
+
     def exit_fullscreen(self):
         """Retour au mode mosaïque."""
         if self._stack.currentIndex() != 1:

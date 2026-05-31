@@ -380,6 +380,7 @@ class BatchWindow(
         self._export_detail.restore_requested.connect(self._on_detail_restore)
         self._export_detail.export_deleted.connect(self._on_detail_deleted)
         self._export_detail.best_changed.connect(self._on_detail_best_changed)
+        self._export_detail.nav_switch_requested.connect(self._on_detail_nav_switch)
         result_lay.addWidget(self._export_detail)
         self._tabs.addTab(result_wrapper, "Résultat")   # _TAB_RESULT
 
@@ -517,6 +518,19 @@ class BatchWindow(
         mgr.set_best(stem, index)
         self._export_mosaic.set_best_index(index)
         self._export_detail.set_best_index(index)
+
+    def _on_detail_nav_switch(self, entry) -> None:
+        """Navigation vers un export via les pills de l'onglet Résultat."""
+        mgr = self._session.get_export_manager()
+        self._export_detail.set_export_manager(mgr)
+        if self._current_cfg:
+            stem = os.path.splitext(self._current_cfg.filename)[0]
+            self._export_detail.set_best_index(mgr.get_best_index(stem))
+        self._export_detail.set_entry(
+            entry,
+            all_entries=self._export_mosaic._entries,
+        )
+        self._export_mosaic.switch_to_entry(entry)
 
     def _export_all_best(self) -> None:
         """Exporte les meilleurs exports (ou derniers) en JPEG vers un répertoire."""

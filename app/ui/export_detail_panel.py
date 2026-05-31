@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Optional
 
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QLabel, QPushButton, QScrollArea,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea,
     QMessageBox, QSizePolicy, QFrame,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
@@ -32,7 +32,8 @@ class ExportDetailPanel(QWidget):
     restore_requested = pyqtSignal(object)  # ExportEntry
     delete_requested  = pyqtSignal(object)  # ExportEntry
     export_deleted    = pyqtSignal(object)  # ExportEntry
-    best_changed      = pyqtSignal(object, int)  # ExportEntry, index (or 0 to clear)
+    best_changed      = pyqtSignal(object, int)  # ExportEntry, index
+    nav_switch_requested = pyqtSignal(object)  # ExportEntry
 
     _WIDTH = 240
 
@@ -47,8 +48,19 @@ class ExportDetailPanel(QWidget):
         self._best_index: Optional[int] = None
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(12, 12, 12, 12)
+        lay.setContentsMargins(12, 10, 12, 12)
         lay.setSpacing(8)
+
+        # ── Barre de navigation (pills numérotées) ──
+        self._nav_frame = QFrame()
+        self._nav_frame.setStyleSheet(
+            "QFrame { background: #111126; border-radius: 6px; padding: 4px 2px; }"
+        )
+        self._nav_layout = QHBoxLayout(self._nav_frame)
+        self._nav_layout.setContentsMargins(4, 4, 4, 4)
+        self._nav_layout.setSpacing(4)
+        self._nav_buttons: list[QPushButton] = []
+        lay.addWidget(self._nav_frame)
 
         # ── En-tête ──
         self._title = QLabel()
@@ -147,8 +159,63 @@ class ExportDetailPanel(QWidget):
         self._date_label.setText(date_str)
 
         self._update_best_btn()
+        self._rebuild_nav()
         self._build_param_comparison(entry, all_entries or [])
+    def _rebuild_nav(self):
+        """Reconstruit la barre de navigation numérotée."""
+        # Vider
+        for btn in self._nav_buttons:
+            btn.setParent(None)
+            btn.deleteLater()
+        self._nav_buttons.clear()
+        # Vider le stretch de fin si présent
+        while self._nav_layout.count():
+            item = self._nav_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
 
+        if not self._all_entries:
+            self._nav_frame.setVisible(False)
+            return
+        self._nav_frame.setVisible(True)
+
+        cur_idx = self._entry.index if self._entry else -1
+
+        for entry in self._all_entries:
+            is_cur  = entry.index == cur_idx
+            is_best = entry.index == self._best_index
+            label   = f"{entry.index:03d}"
+            if is_best:
+                label = f"★ {label}"
+
+            btn = QPushButton(label)
+            btn.setFixedHeight(26)
+            btn.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+            )
+            if is_cur:
+                btn.setStyleSheet(
+                    "QPushButton { background:#2a5080; color:#fff; border:none;"
+                    "  border-radius:5px; font-size:10px; font-weight:bold; padding:0 2px;}"
+                    "QPushButton:hover { background:#3a60a0; }"
+                )
+            elif is_best:
+                btn.setStyleSheet(
+                    "QPushButton { background:#3a3a1e; color:#fd6; border:none;"
+                    "  border-radius:5px; font-size:10px; padding:0 2px;}"
+                    "QPushButton:hover { background:#4a4a2e; color:#ff9; }"
+                )
+            else:
+                btn.setStyleSheet(
+                    "QPushButton { background:#252540; color:#99b; border:none;"
+                    "  border-radius:5px; font-size:10px; padding:0 2px;}"
+                    "QPushButton:hover { background:#353560; color:#ccf; }"
+                )
+            btn.clicked.connect(
+                lambda _=False, e=entry: self.nav_switch_requested.emit(e)
+            )
+            self._nav_buttons.append(btn)
+            self._nav_layout.addWidget(btn)
     # ── Comparaison de paramètres ─────────────────────────────────────────────
 
     def _build_param_comparison(
@@ -160,9 +227,10 @@ class ExportDetailPanel(QWidget):
         self._param_compare.set_data(entry, all_entries)
 
     def set_best_index(self, best_index: Optional[int]):
-        """Met à jour l'état du bouton 'Retenir'."""
+        """Met à jour l'état du bouton 'Retenir' et les pills de navigation."""
         self._best_index = best_index
         self._update_best_btn()
+        self._rebuild_nav()
 
     def _update_best_btn(self):
         if self._entry and self._best_index == self._entry.index:
