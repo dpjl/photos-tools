@@ -63,6 +63,11 @@ class NavMixin:
         # ── Onglet Originale ──────────────────────────────────────────────────
         self._origin_view.set_image(img)
 
+        # ── Preview : afficher l'originale immédiatement, le preview calculé ensuite ──
+        if img is not None:
+            self._preview_view.set_image(img)
+            self._preview_status_lbl.setText("…")
+
         # ── Onglet Résultat (chargement lazeux si onglet actif) ───────────────
         if self._tabs.currentIndex() == _TAB_RESULT:
             self._update_dest_view(cfg, force=True)
