@@ -163,16 +163,14 @@ class ExportDetailPanel(QWidget):
         self._build_param_comparison(entry, all_entries or [])
     def _rebuild_nav(self):
         """Reconstruit la barre de navigation numérotée."""
-        # Vider
-        for btn in self._nav_buttons:
-            btn.setParent(None)
-            btn.deleteLater()
-        self._nav_buttons.clear()
-        # Vider le stretch de fin si présent
+        # Vider sans setParent(None) pour éviter le flash fenêtre
         while self._nav_layout.count():
             item = self._nav_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            w = item.widget()
+            if w:
+                w.hide()
+                w.deleteLater()
+        self._nav_buttons.clear()
 
         if not self._all_entries:
             self._nav_frame.setVisible(False)

@@ -184,6 +184,7 @@ class ExportMosaicView(QWidget):
         self._pool = QThreadPool.globalInstance()
         self._fullscreen_entry: Optional[ExportEntry] = None
         self._best_index: Optional[int] = None
+        self._image_cache: dict[int, np.ndarray] = {}  # index → ndarray (BGR)
 
         # Layout empilé : 0=mosaïque, 1=plein format
         self._stack = QStackedLayout(self)
@@ -218,6 +219,7 @@ class ExportMosaicView(QWidget):
         self._selected_entry = None
         self._fullscreen_entry = None
         self._pending_zoom = None
+        self._image_cache.clear()
         self._stack.setCurrentIndex(0)
         self._rebuild_grid()
 
@@ -284,7 +286,7 @@ class ExportMosaicView(QWidget):
             item = self._grid_layout.takeAt(0)
             w = item.widget()
             if w and w is not self._empty_label:
-                w.setParent(None)
+                w.hide()
                 w.deleteLater()
         self._tiles.clear()
 
@@ -295,7 +297,8 @@ class ExportMosaicView(QWidget):
             return
         self._empty_label.setVisible(False)
         if self._empty_label.parent() is self._mosaic_page:
-            self._empty_label.setParent(None)
+            self._grid_layout.removeWidget(self._empty_label)
+            self._empty_label.hide()
 
         # Calculer la grille optimale
         cols = math.ceil(math.sqrt(n))
@@ -345,6 +348,8 @@ class ExportMosaicView(QWidget):
     def _on_image_loaded(self, index: int, img):
         if img is None:
             return
+        # Mettre en cache
+        self._image_cache[index] = img
         for tile in self._tiles:
             if tile.entry.index == index:
                 tile.set_image(img)
@@ -369,23 +374,30 @@ class ExportMosaicView(QWidget):
         self._enter_fullscreen(entry)
         self.export_activated.emit(entry)
 
+    def _get_image(self, entry: ExportEntry) -> Optional[np.ndarray]:
+        """Retourne l'image depuis le cache (async tiles) ou le disque en fallback."""
+        if entry.index in self._image_cache:
+            return self._image_cache[entry.index]
+        img = cv2.imread(entry.image_path, cv2.IMREAD_COLOR)
+        if img is not None:
+            self._image_cache[entry.index] = img
+        return img
+
     def _enter_fullscreen(self, entry: ExportEntry):
         """Bascule en mode plein format pour un export."""
         self._fullscreen_entry = entry
-        img = cv2.imread(entry.image_path, cv2.IMREAD_COLOR)
+        img = self._get_image(entry)
         if img is None:
             return
-        # Récupérer le zoom actuel des viewers mosaïque
+        # Lire le zoom mosaïque AVANT de changer l'image
         zoom_state = None
         for tile in self._tiles:
             if tile.viewer.has_image():
                 zoom_state = tile.viewer.get_zoom_state()
                 break
-        self._full_view.set_image(img)
+        self._full_view.set_image(img)  # fit_in_view implicite
         if zoom_state and zoom_state[0] > 0:
-            QTimer.singleShot(
-                0, lambda z=zoom_state: self._full_view.apply_zoom_state(*z)
-            )
+            self._full_view.apply_zoom_state(*zoom_state)  # synchrone, pas de QTimer
         self._stack.setCurrentIndex(1)
 
     def switch_to_entry(self, entry: ExportEntry):
@@ -396,17 +408,12 @@ class ExportMosaicView(QWidget):
             tile.set_selected(tile.entry.index == entry.index)
 
         if self.is_fullscreen():
-            # Remplacer l'image en plein format en préservant le zoom
-            img = cv2.imread(entry.image_path, cv2.IMREAD_COLOR)
+            # Remplacer l'image depuis le cache — preserve_zoom conserve le zoom actuel
+            img = self._get_image(entry)
             if img is None:
                 return
-            zoom_state = self._full_view.get_zoom_state()
             self._fullscreen_entry = entry
-            self._full_view.set_image(img)
-            if zoom_state and zoom_state[0] > 0:
-                QTimer.singleShot(
-                    0, lambda z=zoom_state: self._full_view.apply_zoom_state(*z)
-                )
+            self._full_view.set_image(img, preserve_zoom=True)
         else:
             self.export_selected.emit(entry)
 
@@ -420,7 +427,6 @@ class ExportMosaicView(QWidget):
             for tile in self._tiles:
                 if tile.viewer.has_image():
                     tile.viewer.apply_zoom_state(*state)
-            # Sauvegarder aussi dans _shared_zoom du parent
             parent = self.parent()
             while parent is not None:
                 if hasattr(parent, "_shared_zoom"):
