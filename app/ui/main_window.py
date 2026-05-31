@@ -7,7 +7,7 @@ import numpy as np
 
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
-    QSplitter, QLabel, QFileDialog, QStatusBar,
+    QSplitter, QLabel, QFileDialog, QStatusBar, QTabWidget,
 )
 from PyQt6.QtCore import Qt, QTimer, QSettings
 from PyQt6.QtGui import QKeySequence, QShortcut, QAction, QUndoStack
@@ -16,6 +16,8 @@ from core.history import HistoryManager
 from core.pipeline import PipelineWorker
 from steps import ALL_STEPS
 from ui.image_view import SyncedImageView
+from ui.export_mosaic import ExportMosaicView
+from ui.export_detail_panel import ExportDetailPanel
 from ui.thumbnail_strip import ThumbnailStrip
 from ui.history_panel import HistoryPanel
 from ui.control_panel import ControlPanel
@@ -171,17 +173,53 @@ class MainApp(
 
         right_layout.addWidget(views_widget, stretch=1)
 
+        # ── Panneau inférieur avec onglets (Pipeline / Exports) ──
+        self._bottom_tabs = QTabWidget()
+        self._bottom_tabs.setStyleSheet(
+            "QTabWidget::pane { border: none; }"
+            "QTabBar::tab { background:#1a1a2e; color:#888; padding:4px 12px;"
+            "  border:none; font-size:10px; }"
+            "QTabBar::tab:selected { background:#22223a; color:#ccc; }"
+        )
+
+        # Onglet Pipeline (historique + vignettes)
+        pipeline_page = QWidget()
+        pp_lay = QVBoxLayout(pipeline_page)
+        pp_lay.setContentsMargins(0, 0, 0, 0)
+        pp_lay.setSpacing(0)
+
         # Historique des runs
         self._history_panel = HistoryPanel()
         self._history_panel.version_activated.connect(self._on_history_activated)
-        right_layout.addWidget(self._history_panel)
+        pp_lay.addWidget(self._history_panel)
 
         # Bande de vignettes
         self._thumb_strip = ThumbnailStrip()
         self._thumb_strip.selected_a.connect(self._on_thumb_a)
         self._thumb_strip.selected_b.connect(self._on_thumb_b)
         self._thumb_strip.save_requested.connect(self._on_save_thumb)
-        right_layout.addWidget(self._thumb_strip)
+        pp_lay.addWidget(self._thumb_strip)
+
+        self._bottom_tabs.addTab(pipeline_page, "Pipeline")
+
+        # Onglet Exports (mosaïque + détail)
+        exports_page = QWidget()
+        ep_lay = QHBoxLayout(exports_page)
+        ep_lay.setContentsMargins(0, 0, 0, 0)
+        ep_lay.setSpacing(0)
+
+        self._export_mosaic_single = ExportMosaicView()
+        self._export_detail_single = ExportDetailPanel()
+
+        self._export_mosaic_single.export_selected.connect(self._on_single_export_selected)
+        self._export_detail_single.restore_requested.connect(self._on_single_restore)
+        self._export_detail_single.export_deleted.connect(self._on_single_deleted)
+
+        ep_lay.addWidget(self._export_mosaic_single, stretch=1)
+        ep_lay.addWidget(self._export_detail_single)
+        self._bottom_tabs.addTab(exports_page, "Exports")
+
+        right_layout.addWidget(self._bottom_tabs)
 
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 0)
@@ -232,4 +270,54 @@ class MainApp(
         QShortcut(QKeySequence("F"), self, self._fit_views)
         QShortcut(QKeySequence("Ctrl+Z"), self, self._undo_stack.undo)
         QShortcut(QKeySequence("Ctrl+Y"), self, self._undo_stack.redo)
+
+    # ── Exports (mode single) ────────────────────────────────────────────────
+
+    def _refresh_single_exports(self):
+        """Rafraîchit la mosaïque d'exports en mode single."""
+        output_dir = getattr(self, "_output_dir", None)
+        if not output_dir or not self._original_path:
+            self._export_mosaic_single.set_exports([])
+            return
+        import os
+        from core.export_manager import ExportManager
+        stem, ext = os.path.splitext(os.path.basename(self._original_path))
+        mgr = ExportManager(output_dir)
+        exports = mgr.list_exports(stem, ext)
+        self._export_mosaic_single.set_exports(exports)
+
+    def _on_single_export_selected(self, entry):
+        import os
+        from core.export_manager import ExportManager
+        output_dir = getattr(self, "_output_dir", None)
+        if output_dir:
+            mgr = ExportManager(output_dir)
+            self._export_detail_single.set_export_manager(mgr)
+        self._export_detail_single.set_entry(
+            entry,
+            all_entries=self._export_mosaic_single._entries,
+        )
+
+    def _on_single_restore(self, entry):
+        """Restaurer les paramètres depuis un export en mode single."""
+        if entry.recipe_data is None:
+            return
+        recipe = entry.recipe_data
+        if "step_order" in recipe:
+            self._ctrl.step_list.set_order(recipe["step_order"])
+        if "step_enabled" in recipe:
+            for sid, val in recipe["step_enabled"].items():
+                panel = self._ctrl.step_list.get_panel(sid)
+                if panel:
+                    panel.set_enabled(val)
+        if "step_params" in recipe:
+            for sid, params in recipe["step_params"].items():
+                panel = self._ctrl.step_list.get_panel(sid)
+                if panel:
+                    panel.set_params(params)
+        self._params_snapshot = self._ctrl.step_list.get_all_params()
+        self._status_bar.showMessage("Configuration restaurée depuis l'export.")
+
+    def _on_single_deleted(self, entry):
+        self._refresh_single_exports()
 

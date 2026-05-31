@@ -183,50 +183,59 @@ class BatchSession:
 
     # ── Sauvegarde ────────────────────────────────────────────────────────────
 
+    def get_export_manager(self):
+        """Retourne un ExportManager pour le répertoire de sortie courant."""
+        from core.export_manager import ExportManager
+        return ExportManager(self.output_dir)
+
     def save_result(
         self,
         config:    BatchImageConfig,
         result_img: Optional[np.ndarray],
-        step_log:  list[dict],
-    ) -> tuple[str, str]:
-        """Sauvegarde l'image résultat et le fichier sidecar JSON.
+    ) -> Optional["ExportEntry"]:
+        """Sauvegarde un export versionné (image + recipe + masques).
 
-        Si l'image de destination existe déjà, elle est ignorée silencieusement
-        (pas d'écrasement). Retourne (chemin_image, chemin_sidecar).
+        Retourne l'ExportEntry créé, ou None si l'image n'a pas été fournie.
         """
-        os.makedirs(self.output_dir, exist_ok=True)
+        if result_img is None:
+            return None
 
-        fname     = config.filename
-        stem, ext = os.path.splitext(fname)
-        out_img   = os.path.join(self.output_dir, fname)
-        out_json  = os.path.join(self.output_dir, stem + ".result.json")
+        mgr = self.get_export_manager()
+        stem, ext = os.path.splitext(config.filename)
 
-        # ── Skip si l'image existe déjà ───────────────────────────────────────
-        if os.path.exists(out_img):
-            return out_img, out_json
-
-        # ── Image ─────────────────────────────────────────────────────────────
-        if result_img is not None:
-            _write_image(result_img, out_img)
-
-        # ── Sidecar JSON ──────────────────────────────────────────────────────
-        sidecar = {
-            "source":       fname,
-            "processed_at": datetime.now().isoformat(timespec="seconds"),
-            "output":       fname,
-            "steps":        step_log,
+        recipe = build_recipe_dict(config)
+        masks = {
+            "mask":        config.inpaint_mask,
+            "redeye_mask": config.redeye_mask,
         }
-        with open(out_json, "w", encoding="utf-8") as f:
-            json.dump(sidecar, f, ensure_ascii=False, indent=2)
 
-        # ── Export recipe versionné (à côté de la source) ────────────────────
-        save_export_recipe(config)
-
-        return out_img, out_json
+        entry = mgr.save_export(stem, ext, result_img, recipe, masks)
+        return entry
 
     def save_recipe(self, config: "BatchImageConfig") -> Optional[str]:
         """Délègue à la fonction module-level save_recipe."""
         return save_recipe(config)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Construction du dict recipe à partir d'une config
+# ══════════════════════════════════════════════════════════════════════════════
+
+def build_recipe_dict(config: "BatchImageConfig") -> dict:
+    """Construit un dict recipe depuis une BatchImageConfig.
+
+    Utilisé par ExportManager et par save_recipe().
+    """
+    return {
+        "version":         2,
+        "source_filename": config.filename,
+        "customized":      config.customized,
+        "step_order":      config.step_order,
+        "step_enabled":    config.step_enabled,
+        "step_params":     config.step_params,
+        "wb_pick":         list(config.wb_pick) if config.wb_pick else None,
+        "wb_patch_radius":  config.wb_patch_radius,
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -251,17 +260,13 @@ def save_recipe(config: "BatchImageConfig") -> Optional[str]:
     stem       = os.path.splitext(os.path.basename(config.file_path))[0]
     recipe_path = os.path.join(source_dir, stem + ".recipe.json")
 
-    recipe: dict = {
-        "version":        1,
-        "customized":     config.customized,
-        "step_order":     config.step_order,
-        "step_enabled":   config.step_enabled,
-        "step_params":    config.step_params,
-        "wb_pick":        list(config.wb_pick) if config.wb_pick else None,
-        "wb_patch_radius": config.wb_patch_radius,
-        "has_mask":       _mask_has_pixels(config.inpaint_mask),
-        "has_redeye_mask": _mask_has_pixels(config.redeye_mask),
-    }
+    recipe = build_recipe_dict(config)
+    # Le recipe de travail utilise version 1 (format local)
+    recipe["version"] = 1
+    recipe["has_mask"] = _mask_has_pixels(config.inpaint_mask)
+    recipe["has_redeye_mask"] = _mask_has_pixels(config.redeye_mask)
+    # Pas besoin de source_filename dans le recipe de travail
+    recipe.pop("source_filename", None)
     try:
         with open(recipe_path, "w", encoding="utf-8") as f:
             json.dump(recipe, f, ensure_ascii=False, indent=2)

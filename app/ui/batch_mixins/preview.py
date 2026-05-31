@@ -12,7 +12,7 @@ from PyQt6.QtCore import pyqtSlot, QTimer
 from ui.batch_window_constants import (
     _FAST_PREVIEW_IDS, _PREVIEW_TABS,
     _TAB_MASK, _TAB_WB, _TAB_REDEYE,
-    _TAB_PREVIEW, _TAB_RESULT, _TAB_DIFF,
+    _TAB_PREVIEW, _TAB_RESULT,
     _TAB_ORIGIN,
 )
 from core.pipeline import PipelineWorker
@@ -59,9 +59,7 @@ class PreviewMixin:
         if index == _TAB_RESULT and self._current_cfg is not None:
             self._update_dest_view(self._current_cfg)
 
-        # 4. Actualiser les onglets diff
-        if index == _TAB_DIFF:
-            self._refresh_diff_source()
+        # 4. (Ancien onglet diff supprimé)
 
         # 5. Appliquer le zoom au nouveau canvas, différé après le layout Qt
         zoom = self._shared_zoom
@@ -89,7 +87,7 @@ class PreviewMixin:
         if index == _TAB_ORIGIN:
             return self._origin_view
         if index == _TAB_RESULT:
-            return self._dest_view
+            return self._export_mosaic
         return None
 
     # ── Timer debounce ────────────────────────────────────────────────────────

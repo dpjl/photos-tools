@@ -11,7 +11,6 @@ _TAB_WB       = 2
 _TAB_REDEYE   = 3
 _TAB_ORIGIN   = 4
 _TAB_RESULT   = 5
-_TAB_DIFF     = 6
 
 # Onglets où l'aperçu rapide est calculé à chaque changement de paramètre
 _PREVIEW_TABS = frozenset({_TAB_PREVIEW, _TAB_MASK, _TAB_WB, _TAB_REDEYE})

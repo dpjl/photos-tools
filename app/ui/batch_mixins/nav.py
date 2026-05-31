@@ -65,15 +65,15 @@ class NavMixin:
 
         # ── Onglet Résultat (chargement lazeux si onglet actif) ───────────────
         if self._tabs.currentIndex() == _TAB_RESULT:
-            self._update_dest_view(cfg)
-        else:
-            self._dest_view.set_image(None)
+            self._update_dest_view(cfg, force=True)
 
         fname = os.path.basename(cfg.file_path)
         self._statusbar.showMessage(f"{fname}  —  prêt")
 
-        # Réinitialiser le mode export et recharger le dropdown
-        self._set_viewing_export(None, _navigate_call=True)
+        # Réinitialiser le mode export et recharger la liste
+        self._is_viewing_export = False
+        self._viewed_export_entry = None
+        self._viewed_export_data = None
         self._refresh_export_dropdown(cfg)
 
         # Mettre à jour les panneaux (mosaïque ou aperçu rapide)

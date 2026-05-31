@@ -31,7 +31,7 @@ import numpy as np
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QLabel,
     QPushButton, QSplitter, QScrollArea, QTabWidget,
-    QStatusBar, QSizePolicy, QMessageBox, QComboBox,
+    QStatusBar, QSizePolicy, QMessageBox, QFileDialog, QProgressDialog,
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QCloseEvent, QUndoStack, QKeySequence, QShortcut
@@ -44,13 +44,15 @@ from ui.batch_thumbnail_strip import BatchThumbnailStrip
 from ui.mask_editor import MaskCanvasPanel
 from ui.wb_picker import WBPickerPanel
 from ui.image_view import SyncedImageView
-from ui.json_diff_panel import JsonDiffPanel
+from ui.export_mosaic import ExportMosaicView
+from ui.export_detail_panel import ExportDetailPanel
 from ui.notifications import NotificationManager, Level
 from ui.batch_window_constants import (
     _FAST_PREVIEW_IDS, _PREVIEW_TABS,
     _TAB_PREVIEW, _TAB_MASK, _TAB_WB, _TAB_REDEYE,
-    _TAB_ORIGIN, _TAB_RESULT, _TAB_DIFF,
+    _TAB_ORIGIN, _TAB_RESULT,
 )
+from core.export_manager import ExportManager, ExportEntry
 from ui.batch_mixins.nav import NavMixin
 from ui.batch_mixins.params import ParamsMixin
 from ui.batch_mixins.preview import PreviewMixin
@@ -108,8 +110,8 @@ class BatchWindow(
 
         # Export visionné
         self._is_viewing_export:  bool          = False
-        self._viewed_export_path: Optional[str] = None
-        self._viewed_export_list: list[tuple[int, str]] = []
+        self._viewed_export_entry = None  # ExportEntry | None
+        self._viewed_export_list: list = []  # list[ExportEntry]
 
         # Preview complet
         self._full_preview_worker: Optional[PipelineWorker] = None
@@ -213,6 +215,16 @@ class BatchWindow(
         self._stop_btn.clicked.connect(self._stop)
         lay.addWidget(self._stop_btn)
 
+        lay.addSpacing(12)
+
+        self._export_best_btn = QPushButton("📤  Exporter les retenus")
+        self._style_btn(self._export_best_btn)
+        self._export_best_btn.setToolTip(
+            "Exporter les meilleurs exports (ou derniers) en JPEG vers un répertoire"
+        )
+        self._export_best_btn.clicked.connect(self._export_all_best)
+        lay.addWidget(self._export_best_btn)
+
         return bar
 
     def _build_main_area(self) -> QSplitter:
@@ -238,38 +250,6 @@ class BatchWindow(
         hdr_lbl = QLabel("Étapes — par image")
         hdr_lbl.setStyleSheet("color:#ddd; font-size:12px; font-weight:700;")
         hdr_lay.addWidget(hdr_lbl, stretch=1)
-
-        # Combo exports
-        self._export_combo = QComboBox()
-        self._export_combo.setMaximumWidth(185)
-        self._export_combo.setToolTip(
-            "Visualiser une configuration exportée précédente (lecture seule)"
-        )
-        self._export_combo.setStyleSheet(
-            "QComboBox { background:#1a1a30; color:#9de; border:1px solid #2a2a4a;"
-            "  border-radius:3px; padding:2px 4px; font-size:10px; }"
-            "QComboBox::drop-down { border:none; }"
-            "QComboBox QAbstractItemView { background:#1a1a30; color:#9de;"
-            "  selection-background-color:#2a3a5a; border:1px solid #3a3a6a; }"
-        )
-        self._export_combo.currentIndexChanged.connect(self._on_export_selected)
-        hdr_lay.addWidget(self._export_combo)
-
-        # Bouton restaurer
-        self._restore_export_btn = QPushButton("↩")
-        self._restore_export_btn.setFixedSize(24, 24)
-        self._restore_export_btn.setVisible(False)
-        self._restore_export_btn.setToolTip(
-            "Restaurer cette configuration en mode édition\n"
-            "(chargement mémoire uniquement — sauvegarder ensuite si souhaité)"
-        )
-        self._restore_export_btn.setStyleSheet(
-            "QPushButton { background:#2a3a2a; color:#6e8; border-radius:4px;"
-            "  font-size:14px; }"
-            "QPushButton:hover { background:#3a4a3a; color:#aea; }"
-        )
-        self._restore_export_btn.clicked.connect(self._restore_export)
-        hdr_lay.addWidget(self._restore_export_btn)
 
         self._reload_recipe_btn = QPushButton("↺")
         self._reload_recipe_btn.setFixedSize(24, 24)
@@ -328,7 +308,7 @@ class BatchWindow(
             "QTabBar::tab:hover { color:#bbb; }"
         )
 
-        _SIDEBAR_W = 215
+        _SIDEBAR_W = 240
         _dummy = np.zeros((1, 1, 3), dtype=np.uint8)
         self._mask_panel = MaskCanvasPanel(_dummy, None, show_ok_cancel=False,
                                            sidebar_width=_SIDEBAR_W)
@@ -339,7 +319,6 @@ class BatchWindow(
                                               sidebar_width=_SIDEBAR_W)
 
         self._origin_view = SyncedImageView()
-        self._dest_view   = SyncedImageView()
 
         # Onglet Preview
         self._preview_view = SyncedImageView()
@@ -386,11 +365,24 @@ class BatchWindow(
         self._tabs.addTab(self._wb_panel,                                 "Blanc")         # _TAB_WB
         self._tabs.addTab(self._redeye_panel,                             "Yeux rouges")   # _TAB_REDEYE
         self._tabs.addTab(self._wrap_with_sidebar(self._origin_view, _SIDEBAR_W), "Originale")  # _TAB_ORIGIN
-        self._tabs.addTab(self._wrap_with_sidebar(self._dest_view,   _SIDEBAR_W), "Résultat")   # _TAB_RESULT
 
-        self._diff_source_panel = JsonDiffPanel()
-        self._diff_source_panel.set_refresh_fn(self._refresh_diff_source)
-        self._tabs.addTab(self._diff_source_panel, "Δ Exports")   # _TAB_DIFF
+        # ── Onglet Résultat : mosaïque d'exports ──
+        self._export_mosaic = ExportMosaicView()
+        self._export_mosaic.export_selected.connect(self._on_mosaic_export_selected)
+        self._export_mosaic.export_activated.connect(self._on_mosaic_export_activated)
+        result_wrapper = QWidget()
+        result_lay = QHBoxLayout(result_wrapper)
+        result_lay.setContentsMargins(0, 0, 0, 0)
+        result_lay.setSpacing(0)
+        result_lay.addWidget(self._export_mosaic, stretch=1)
+        # Panneau détail export (sidebar, toujours visible)
+        self._export_detail = ExportDetailPanel()
+        self._export_detail.restore_requested.connect(self._on_detail_restore)
+        self._export_detail.export_deleted.connect(self._on_detail_deleted)
+        self._export_detail.best_changed.connect(self._on_detail_best_changed)
+        result_lay.addWidget(self._export_detail)
+        self._tabs.addTab(result_wrapper, "Résultat")   # _TAB_RESULT
+
         self._tabs.currentChanged.connect(self._on_tab_changed)
         rl.addWidget(self._tabs)
 
@@ -421,16 +413,179 @@ class BatchWindow(
     # ══════════════════════════════════════════════════════════════════════════
 
     def _get_result_from_disk(self, cfg: BatchImageConfig) -> Optional[np.ndarray]:
+        """Charge l'image du dernier export versionné depuis output_dir."""
         if not self._session.output_dir:
             return None
-        path = os.path.join(self._session.output_dir, os.path.basename(cfg.file_path))
-        if os.path.exists(path):
-            return cv2.imread(path, cv2.IMREAD_COLOR)
-        return None
+        mgr = self._session.get_export_manager()
+        stem, ext = os.path.splitext(cfg.filename)
+        exports = mgr.list_exports(stem, ext)
+        if not exports:
+            return None
+        return mgr.load_image(exports[-1])
 
-    def _update_dest_view(self, cfg: BatchImageConfig) -> None:
-        result = self._get_result_from_disk(cfg)
-        self._dest_view.set_image(result)
+    def _update_dest_view(self, cfg: BatchImageConfig, force: bool = False) -> None:
+        """Met à jour la mosaïque d'exports pour l'image courante.
+
+        Si force=False (tab switch), préserve l'état (fullscreen, sélection).
+        Si force=True (nouvelle image, nouvel export), reset complet.
+        """
+        if not self._session.output_dir:
+            self._export_mosaic.set_exports([])
+            return
+        mgr = self._session.get_export_manager()
+        stem, ext = os.path.splitext(cfg.filename)
+        exports = mgr.list_exports(stem, ext)
+        best_idx = mgr.get_best_index(stem)
+        if force:
+            self._export_mosaic.set_exports(exports)
+        else:
+            self._export_mosaic.update_exports_if_changed(exports)
+        self._export_mosaic.set_best_index(best_idx)
+        self._export_detail.set_best_index(best_idx)
+
+    # ── Signaux mosaïque ─────────────────────────────────────────────────────
+
+    def _on_mosaic_export_selected(self, entry) -> None:
+        """Un export a été sélectionné dans la mosaïque."""
+        mgr = self._session.get_export_manager()
+        self._export_detail.set_export_manager(mgr)
+        # Propager le best index courant
+        if self._current_cfg:
+            stem = os.path.splitext(self._current_cfg.filename)[0]
+            self._export_detail.set_best_index(mgr.get_best_index(stem))
+        self._export_detail.set_entry(
+            entry,
+            all_entries=self._export_mosaic._entries,
+        )
+
+    def _on_mosaic_export_activated(self, entry) -> None:
+        """Double-clic sur un export → mode plein format."""
+        pass  # Le basculement est géré par ExportMosaicView
+
+    def _on_detail_restore(self, entry) -> None:
+        """Restaure les paramètres depuis un export sélectionné."""
+        from core.batch import _apply_recipe
+        cfg = self._current_cfg
+        if cfg is None or entry.recipe_data is None:
+            return
+        mgr = self._session.get_export_manager()
+        data = dict(entry.recipe_data)
+        mask = mgr.load_mask(entry)
+        if mask is not None:
+            data["_mask"] = mask
+        redeye = mgr.load_redeye_mask(entry)
+        if redeye is not None:
+            data["_redeye_mask"] = redeye
+        _apply_recipe(cfg, data)
+        # Rafraîchir l'UI
+        self._applying_order = True
+        for sid, enabled in cfg.step_enabled.items():
+            panel = self._step_list.get_panel(sid)
+            if panel:
+                panel.set_enabled(enabled)
+        for sid, params in cfg.step_params.items():
+            panel = self._step_list.get_panel(sid)
+            if panel:
+                panel.set_params(params)
+        self._step_list.set_order(cfg.step_order)
+        self._applying_order = False
+        # Restaurer la position WB dans l'éditeur
+        if cfg.wb_pick:
+            self._wb_panel._canvas.set_pick_point(cfg.wb_pick)
+            self._wb_panel._refresh_pick_info(*cfg.wb_pick)
+        else:
+            self._wb_panel._clear_pick()
+        if cfg.wb_patch_radius:
+            self._wb_panel._rad_slider.setValue(cfg.wb_patch_radius)
+            self._wb_panel._rad_val_lbl.setText(f"{cfg.wb_patch_radius} px")
+        self._statusbar.showMessage("Configuration restaurée depuis l'export.")
+        self._schedule_preview_update()
+
+    def _on_detail_deleted(self, entry) -> None:
+        """Un export a été supprimé — rafraîchir la mosaïque."""
+        if self._current_cfg:
+            self._update_dest_view(self._current_cfg, force=True)
+            self._refresh_export_dropdown(self._current_cfg)
+
+    def _on_detail_best_changed(self, entry, index) -> None:
+        """Un export a été marqué comme retenu."""
+        cfg = self._current_cfg
+        if not cfg:
+            return
+        mgr = self._session.get_export_manager()
+        stem = os.path.splitext(cfg.filename)[0]
+        mgr.set_best(stem, index)
+        self._export_mosaic.set_best_index(index)
+        self._export_detail.set_best_index(index)
+
+    def _export_all_best(self) -> None:
+        """Exporte les meilleurs exports (ou derniers) en JPEG vers un répertoire."""
+        if not self._session.output_dir:
+            QMessageBox.warning(
+                self, "Export impossible",
+                "Aucun répertoire de sortie configuré."
+            )
+            return
+
+        dest = QFileDialog.getExistingDirectory(
+            self, "Répertoire de destination JPEG"
+        )
+        if not dest:
+            return
+
+        mgr = self._session.get_export_manager()
+        configs = self._session.images
+        if not configs:
+            return
+
+        # Collecter les paires (stem, ext) à exporter
+        items: list[tuple[str, str, str]] = []  # (stem, ext, original_filename)
+        for cfg in configs:
+            stem, ext = os.path.splitext(cfg.filename)
+            best = mgr.get_best_entry(stem, ext)
+            if best and os.path.exists(best.image_path):
+                items.append((stem, best.image_path, cfg.filename))
+
+        if not items:
+            self._statusbar.showMessage("Aucun export à exporter.")
+            return
+
+        progress = QProgressDialog(
+            "Export JPEG en cours…", "Annuler", 0, len(items), self
+        )
+        progress.setWindowTitle("Export JPEG")
+        progress.setMinimumDuration(0)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setValue(0)
+        from PyQt6.QtWidgets import QApplication
+        QApplication.processEvents()
+
+        exported = 0
+        for i, (stem, src_path, original_name) in enumerate(items):
+            if progress.wasCanceled():
+                break
+            progress.setValue(i)
+            progress.setLabelText(f"{stem}.jpg  ({i + 1}/{len(items)})")
+            QApplication.processEvents()
+
+            img = cv2.imread(src_path, cv2.IMREAD_COLOR)
+            if img is None:
+                continue
+
+            jpg_name = stem + ".jpg"
+            jpg_path = os.path.join(dest, jpg_name)
+            cv2.imwrite(
+                jpg_path, img,
+                [cv2.IMWRITE_JPEG_QUALITY, 95,
+                 cv2.IMWRITE_JPEG_OPTIMIZE, 1,
+                 cv2.IMWRITE_JPEG_PROGRESSIVE, 1],
+            )
+            exported += 1
+
+        progress.setValue(len(items))
+        self._statusbar.showMessage(
+            f"Export terminé : {exported}/{len(items)} images JPEG → {dest}"
+        )
 
     # ══════════════════════════════════════════════════════════════════════════
     # Utilitaires UI

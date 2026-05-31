@@ -8,6 +8,8 @@ import cv2
 import numpy as np
 from PyQt6.QtWidgets import QFileDialog
 
+from core.export_manager import ExportManager
+
 
 class FileIOMixin:
 
@@ -69,17 +71,55 @@ class FileIOMixin:
         )
 
     def _save_result(self):
-        """Enregistre l'image affichée dans la vue A (Ctrl+S)."""
+        """Enregistre l'image affichée dans la vue A (Ctrl+S).
+
+        Premier appel : demande le répertoire de sortie.
+        Appels suivants : export automatique avec numéro incrémenté.
+        """
         img = self._get_image(*self._view_a)
         if img is None:
             self._status_bar.showMessage("Rien à enregistrer.")
             return
-        stem = os.path.splitext(os.path.basename(self._original_path))[0]
-        default = os.path.join(
-            os.path.dirname(self._original_path),
-            f"{stem}_restauree.jpg",
+        if not self._original_path:
+            self._status_bar.showMessage("Aucune image source.")
+            return
+
+        # Choisir le répertoire de sortie si pas encore défini
+        if not getattr(self, "_output_dir", None):
+            path = QFileDialog.getExistingDirectory(
+                self, "Dossier de sortie",
+                os.path.dirname(self._original_path),
+            )
+            if not path:
+                return
+            self._output_dir = path
+
+        stem, ext = os.path.splitext(os.path.basename(self._original_path))
+        if not ext:
+            ext = ".jpg"
+
+        # Construire le recipe depuis l'état courant
+        recipe = {
+            "version":         2,
+            "source_filename": os.path.basename(self._original_path),
+            "step_order":      self._ctrl.step_list.get_order(),
+            "step_enabled":    self._ctrl.step_list.get_enabled(),
+            "step_params":     self._ctrl.step_list.get_all_params(),
+        }
+
+        mgr = ExportManager(self._output_dir)
+        entry = mgr.save_export(stem, ext, img, recipe)
+
+        self._status_bar.showMessage(
+            f"Exporté : {os.path.basename(entry.image_path)}"
         )
-        self._save_dialog(img, default)
+
+        # Rafraîchir la mosaïque d'exports si disponible
+        if hasattr(self, "_refresh_single_exports"):
+            self._refresh_single_exports()
+            # Basculer vers l'onglet Exports
+            if hasattr(self, "_bottom_tabs"):
+                self._bottom_tabs.setCurrentIndex(1)
 
     def _on_save_thumb(self, step_id: str):
         """Enregistre l'image correspondant à la vignette choisie."""

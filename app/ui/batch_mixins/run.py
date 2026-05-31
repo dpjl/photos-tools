@@ -12,7 +12,7 @@ import numpy as np
 from PyQt6.QtCore import pyqtSlot
 from PyQt6.QtWidgets import QFileDialog
 
-from core.batch import BatchImageConfig, build_step_log, save_recipe
+from core.batch import BatchImageConfig, save_recipe
 from core.pipeline import PipelineWorker
 from ui.batch_window_constants import _TAB_RESULT
 
@@ -97,26 +97,6 @@ class RunMixin:
             self._batch_done()
             return
         cfg = self._batch_queue.pop(0)
-
-        # Skip anticipé si la destination existe déjà
-        if self._session.output_dir:
-            out_img = os.path.join(self._session.output_dir, cfg.filename)
-            if os.path.exists(out_img):
-                cfg.batch_status = "done"
-                self._strip.set_done(cfg.file_path, True)
-                self._batch_run_done += 1
-                total_str = f"/{self._batch_run_total}" if self._batch_run_total > 1 else ""
-                if hasattr(self, "_notif"):
-                    self._notif.notify(
-                        f"⏭ {cfg.filename}",
-                        f"Ignoré (déjà exporté)  •  {self._batch_run_done}{total_str}",
-                        level=Level.INFO,
-                        duration=3000,
-                        key="batch_progress",
-                    )
-                self._statusbar.showMessage(f"⏭ Ignoré (existe) : {cfg.filename}")
-                self._process_next_batch()
-                return
 
         cfg.batch_status = "running"
         self._strip.set_running(cfg.file_path, True)
@@ -218,7 +198,7 @@ class RunMixin:
                 self._wb_panel._canvas.set_display_image(result_img)
                 self._redeye_panel._canvas.set_display_image(result_img)
                 if self._tabs.currentIndex() == _TAB_RESULT:
-                    self._dest_view.set_image(result_img)
+                    self._update_dest_view(cfg, force=True)
 
         cfg.batch_status = "done"
         self._strip.set_running(cfg.file_path, False)
@@ -236,16 +216,9 @@ class RunMixin:
                 key="batch_progress",
             )
 
-        step_log = build_step_log(
-            step_order   = cfg.step_order,
-            step_enabled = cfg.step_enabled,
-            step_params  = cfg.step_params,
-            step_results = self._worker_step_results,
-            context      = cfg.context,
-            steps_by_id  = self._steps_by_id,
-        )
+        step_log = None  # Plus de step_log — le recipe contient tout
         try:
-            self._session.save_result(cfg, result_img, step_log)
+            self._session.save_result(cfg, result_img)
         except Exception as exc:
             self._statusbar.showMessage(f"Erreur sauvegarde : {exc}")
 
