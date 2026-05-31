@@ -89,10 +89,11 @@ class RedEyeStep(StepBase):
         if self._face_helper is None:
             import torch
             from facexlib.utils.face_restoration_helper import FaceRestoreHelper
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             self._face_helper = FaceRestoreHelper(
                 upscale_factor=1, face_size=512, crop_ratio=(1, 1),
                 det_model="retinaface_resnet50", save_ext="png",
-                use_parse=False, device=torch.device("cpu"),
+                use_parse=False, device=device,
             )
         return self._face_helper
 
@@ -181,7 +182,9 @@ class RedEyeStep(StepBase):
                         "corrected": ok,
                     })
 
-        return result, {"redeye_detections": detections}
+        # Partager les bboxes dans le contexte pour les étapes suivantes (ex. SCUNet)
+        face_bboxes = [(x1, y1, x2, y2) for (x1, y1, x2, y2, _s) in faces] if faces else []
+        return result, {"redeye_detections": detections, "face_bboxes": face_bboxes}
 
     def _process_manual(self, img: np.ndarray, strength: float):
         """Mode manuel : correction des pixels marqués dans le masque peint."""

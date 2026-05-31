@@ -35,13 +35,11 @@ class RembgStep(StepBase):
     ]
 
     def __init__(self):
-        self._session = None
+        pass
 
     def _get_session(self):
-        if self._session is None:
-            from rembg import new_session
-            self._session = new_session("u2net")
-        return self._session
+        from core.rembg_session import get_shared_session
+        return get_shared_session()
 
     def process(self, img: np.ndarray, params: dict, context: dict):
         result = _correct_color_rembg(

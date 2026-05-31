@@ -253,6 +253,14 @@ class RunMixin:
             self._refresh_export_dropdown(cfg)
             self._refresh_if_diff_tab()
 
+        # Libérer le cache GPU entre chaque image du batch
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
         self._process_next_batch()
 
     # ── Contrôles ─────────────────────────────────────────────────────────────
