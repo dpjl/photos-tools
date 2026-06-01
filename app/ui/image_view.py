@@ -265,11 +265,12 @@ class SyncedImageView(QGraphicsView):
         self._broadcast()
 
     def resizeEvent(self, event):
-        super().resizeEvent(event)
-        # Re-fit si l'image est présente et qu'on était en mode fit
+        was_fit = False
         if self._pix_item is not None:
             cur = self._current_zoom()
-            fz  = self._fit_zoom()
-            # Si on était proche du fit-zoom (±10 %), rester en fit
-            if fz > 0 and abs(cur - fz) / fz < 0.1:
-                self.fit_in_view()
+            fz = self._fit_zoom()
+            was_fit = fz > 0 and abs(cur / fz - 1.0) < 0.1
+        super().resizeEvent(event)
+        # Re-fit si l'image était en mode fit avant le changement de taille.
+        if self._pix_item is not None and was_fit:
+            self.fit_in_view()

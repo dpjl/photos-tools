@@ -33,7 +33,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QSplitter, QScrollArea, QTabWidget,
     QStatusBar, QSizePolicy, QMessageBox, QFileDialog, QProgressDialog,
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QSettings, pyqtSignal
 from PyQt6.QtGui import QCloseEvent, QUndoStack, QKeySequence, QShortcut
 
 from core.pipeline import PipelineWorker
@@ -71,6 +71,9 @@ class BatchWindow(
     """Fenêtre de traitement par lots."""
 
     closed = pyqtSignal()
+    _SETTINGS_ORG = "PlusTekPhoto"
+    _SETTINGS_APP = "RestaurationPhoto"
+    _SETTING_STRIP_HIDDEN = "batch/thumbnail_strip_hidden"
 
     def __init__(self, parent, session: BatchSession) -> None:
         super().__init__(parent)
@@ -81,6 +84,10 @@ class BatchWindow(
         self._steps_by_id = {s.id: s for s in ALL_STEPS}
         self._current_cfg: Optional[BatchImageConfig] = None
         self._worker:      Optional[PipelineWorker]   = None
+        self._settings = QSettings(self._SETTINGS_ORG, self._SETTINGS_APP)
+        self._strip_hidden = self._read_bool_setting(
+            self._SETTING_STRIP_HIDDEN, False
+        )
 
         self._current_orig: Optional[np.ndarray] = None
 
@@ -152,6 +159,7 @@ class BatchWindow(
         self._strip.image_selected.connect(self._on_strip_image_selected)
         self._strip.image_reset.connect(self._on_strip_image_reset)
         root.addWidget(self._strip)
+        self._apply_strip_visibility(persist=False)
 
         root.addWidget(self._build_main_area(), stretch=1)
 
@@ -183,6 +191,13 @@ class BatchWindow(
         self._style_btn(btn_browse)
         btn_browse.clicked.connect(self._choose_output_dir)
         lay.addWidget(btn_browse)
+
+        self._toggle_strip_btn = QPushButton()
+        self._toggle_strip_btn.setCheckable(True)
+        self._style_btn(self._toggle_strip_btn)
+        self._toggle_strip_btn.toggled.connect(self._on_strip_visibility_toggled)
+        lay.addWidget(self._toggle_strip_btn)
+        self._sync_strip_toggle_button()
 
         lay.addStretch()
 
@@ -226,6 +241,40 @@ class BatchWindow(
         lay.addWidget(self._export_best_btn)
 
         return bar
+
+    def _read_bool_setting(self, key: str, default: bool) -> bool:
+        """Lit un booléen QSettings en restant robuste selon le backend."""
+        value = self._settings.value(key, default)
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return default
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _on_strip_visibility_toggled(self, hidden: bool) -> None:
+        self._strip_hidden = hidden
+        self._apply_strip_visibility(persist=True)
+
+    def _apply_strip_visibility(self, persist: bool) -> None:
+        if hasattr(self, "_strip"):
+            self._strip.setVisible(not self._strip_hidden)
+        self._sync_strip_toggle_button()
+        if persist:
+            self._settings.setValue(self._SETTING_STRIP_HIDDEN, self._strip_hidden)
+
+    def _sync_strip_toggle_button(self) -> None:
+        if not hasattr(self, "_toggle_strip_btn"):
+            return
+        btn = self._toggle_strip_btn
+        previous = btn.blockSignals(True)
+        btn.setChecked(self._strip_hidden)
+        if self._strip_hidden:
+            btn.setText("▾  Afficher les vignettes")
+            btn.setToolTip("Afficher le bandeau des photos du batch")
+        else:
+            btn.setText("▴  Masquer les vignettes")
+            btn.setToolTip("Masquer le bandeau des photos du batch pour agrandir les vues")
+        btn.blockSignals(previous)
 
     def _build_main_area(self) -> QSplitter:
         splitter = QSplitter(Qt.Orientation.Horizontal)
