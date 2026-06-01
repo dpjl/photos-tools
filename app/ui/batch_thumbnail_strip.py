@@ -289,6 +289,7 @@ class BatchThumbnailStrip(QWidget):
         self._cards: dict[str, BatchThumbCard] = {}   # file_path → card
         self._selected_path: Optional[str] = None
         self._run_paths: set[str] = set()              # sélection pour exécution
+        self._override_pixmaps: dict[str, QPixmap] = {}
 
         self._loader: Optional[_ThumbLoader] = None
         self._loader_thread: Optional[QThread] = None
@@ -301,6 +302,7 @@ class BatchThumbnailStrip(QWidget):
         self._cards.clear()
         self._selected_path = None
         self._run_paths.clear()
+        self._override_pixmaps.clear()
 
         # Nettoyer le layout
         while self._row.count() > 1:
@@ -374,7 +376,15 @@ class BatchThumbnailStrip(QWidget):
         rgb   = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
         data  = np.ascontiguousarray(rgb)
         qimg  = QImage(data.tobytes(), nw, nh, nw * 3, QImage.Format.Format_RGB888)
-        self._cards[file_path].set_pixmap(QPixmap.fromImage(qimg))
+        pix = QPixmap.fromImage(qimg)
+        self._override_pixmaps[file_path] = pix
+        self._cards[file_path].set_pixmap(pix)
+
+    def use_original_thumb(self, file_path: str) -> None:
+        """Réaffiche l'image originale pour une carte."""
+        self._override_pixmaps.pop(file_path, None)
+        if file_path in self._cards:
+            self._cards[file_path].set_pixmap(_load_thumbnail(file_path))
 
     def count(self) -> int:
         return len(self._cards)
@@ -429,7 +439,9 @@ class BatchThumbnailStrip(QWidget):
 
     def _on_thumb_ready(self, file_path: str, pix: QPixmap) -> None:
         if file_path in self._cards:
-            self._cards[file_path].set_pixmap(pix)
+            self._cards[file_path].set_pixmap(
+                self._override_pixmaps.get(file_path, pix)
+            )
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 

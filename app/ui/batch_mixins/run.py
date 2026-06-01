@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import time
 from typing import TYPE_CHECKING
 
@@ -12,7 +11,7 @@ import numpy as np
 from PyQt6.QtCore import pyqtSlot
 from PyQt6.QtWidgets import QFileDialog
 
-from core.batch import BatchImageConfig, save_recipe
+from core.batch import BatchImageConfig
 from core.pipeline import PipelineWorker
 from ui.batch_window_constants import _TAB_RESULT
 
@@ -46,28 +45,6 @@ class RunMixin:
         queue.sort(key=lambda c: order_index.get(c.file_path, 0))
         self._run_batch_from_queue(queue)
 
-    # ── Appliquer à toutes ────────────────────────────────────────────────────
-
-    def _apply_to_all_uncustomized(self) -> None:
-        self._save_current_state()
-        cfg = self._current_cfg
-        if cfg is None:
-            return
-        targets = [
-            c for c in self._session.images
-            if c is not cfg and not c.customized
-        ]
-        if not targets:
-            self._statusbar.showMessage("Aucune image non personnalisée à mettre à jour.")
-            return
-        for target in targets:
-            target.step_order   = list(cfg.step_order)
-            target.step_enabled = dict(cfg.step_enabled)
-            target.step_params  = {k: dict(v) for k, v in cfg.step_params.items()}
-        self._statusbar.showMessage(
-            f"Paramètres appliqués à {len(targets)} image(s) non personnalisée(s)."
-        )
-
     # ── Batch complet ─────────────────────────────────────────────────────────
 
     def _run_batch(self) -> None:
@@ -84,7 +61,6 @@ class RunMixin:
 
     def _run_batch_from_queue(self, queue: list["BatchImageConfig"]) -> None:
         self._batch_queue    = queue
-        self._batch_step_log: dict[str, list[dict]] = {}
         self._batch_run_total = len(queue)
         self._batch_run_done  = 0
         self._batch_run_start = time.monotonic()
@@ -92,7 +68,6 @@ class RunMixin:
         self._process_next_batch()
 
     def _process_next_batch(self) -> None:
-        from ui.notifications import Level
         if not self._batch_queue:
             self._batch_done()
             return
@@ -192,13 +167,10 @@ class RunMixin:
         cfg.context = entry.context
 
         if result_img is not None:
-            self._strip.update_result_thumb(cfg.file_path, result_img)
             if cfg is self._current_cfg:
                 self._mask_panel._canvas.set_display_image(result_img)
                 self._wb_panel._canvas.set_display_image(result_img)
                 self._redeye_panel._canvas.set_display_image(result_img)
-                if self._tabs.currentIndex() == _TAB_RESULT:
-                    self._update_dest_view(cfg, force=True)
 
         cfg.batch_status = "done"
         self._strip.set_running(cfg.file_path, False)
@@ -216,14 +188,16 @@ class RunMixin:
                 key="batch_progress",
             )
 
-        step_log = None  # Plus de step_log — le recipe contient tout
         try:
             self._session.save_result(cfg, result_img)
         except Exception as exc:
             self._statusbar.showMessage(f"Erreur sauvegarde : {exc}")
 
+        self._refresh_strip_thumb(cfg)
         if cfg is self._current_cfg:
             self._refresh_export_dropdown(cfg)
+            if self._tabs.currentIndex() == _TAB_RESULT:
+                self._update_dest_view(cfg, force=True)
             self._refresh_if_diff_tab()
 
         # Libérer le cache GPU entre chaque image du batch
@@ -249,7 +223,6 @@ class RunMixin:
     def _set_buttons_running(self, running: bool) -> None:
         self._selection_btn.setEnabled(not running)
         self._batch_btn.setEnabled(not running)
-        self._apply_btn.setEnabled(not running)
         self._stop_btn.setEnabled(running)
         self._full_preview_btn.setEnabled(not running)
 

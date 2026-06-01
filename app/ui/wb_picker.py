@@ -10,11 +10,7 @@ Usage typique :
             step.clear_pick_point()
 
 La position cliquee est sauvegardee en coordonnees image ; les valeurs RGB
-sont toujours lues depuis l'image ORIGINALE passee au dialogue (pas l'image
-auto-niveaux si l'apercu est actif).
-
-Le bouton « Auto niveaux (apercu) » modifie uniquement l'affichage du canvas
-pour faciliter la selection visuelle. Cette correction est jetee a la fermeture.
+sont toujours lues depuis l'image ORIGINALE passee au dialogue.
 """
 
 from __future__ import annotations
@@ -61,7 +57,7 @@ class WBPickerCanvas(QWidget):
         ih, iw = image_bgr.shape[:2]
         self._img_w, self._img_h = iw, ih
 
-        # Image d'affichage (peut etre remplacee par la version auto-niveaux)
+        # Image d'affichage
         rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
         self._disp_pixmap: QPixmap = self._make_rgb_pixmap(rgb)
 
@@ -142,7 +138,7 @@ class WBPickerCanvas(QWidget):
         self.update()
 
     def set_display_image(self, bgr: np.ndarray) -> None:
-        """Change l'image affichee (auto-niveaux, etc.). Pas d'effet sur les coords."""
+        """Change l'image affichee. Pas d'effet sur les coords."""
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         self._disp_pixmap = self._make_rgb_pixmap(rgb)
         self.update()
@@ -375,8 +371,6 @@ class WBPickerPanel(QWidget):
     ) -> None:
         super().__init__(parent)
         self._orig_bgr           = image_bgr.copy()
-        self._auto_levels_active = False
-
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -479,19 +473,6 @@ class WBPickerPanel(QWidget):
         btn_clear_wb.clicked.connect(self._clear_pick)
         self._style(btn_clear_wb)
         sl.addWidget(btn_clear_wb)
-        sl.addWidget(self._hline())
-
-        self._auto_btn = QPushButton("📐  Auto niveaux (aperçu)")
-        self._auto_btn.setCheckable(True)
-        self._auto_btn.clicked.connect(self._toggle_auto_levels)
-        self._style(self._auto_btn)
-        sl.addWidget(self._auto_btn)
-
-        lbl_auto_info = QLabel(
-            "Aperçu seulement — les\ncoord. conservent leurs\nvaleurs d'origine."
-        )
-        lbl_auto_info.setStyleSheet("color:#556; font-size:9px;")
-        sl.addWidget(lbl_auto_info)
         sl.addStretch()
 
         if show_ok_cancel:
@@ -527,10 +508,6 @@ class WBPickerPanel(QWidget):
     ) -> None:
         """Change l'image affichée (mode batch — changement de photo)."""
         self._orig_bgr = image_bgr.copy()
-        if self._auto_levels_active:
-            self._auto_btn.setChecked(False)
-            self._auto_btn.setText("📐  Auto niveaux (aperçu)")
-            self._auto_levels_active = False
         self._canvas.reset_image(image_bgr, initial_pick)
         self._rad_slider.setValue(patch_radius)
         self._rad_val_lbl.setText(f"{patch_radius} px")
@@ -627,19 +604,6 @@ class WBPickerPanel(QWidget):
         self._muls_lbl.setText("")
         self._warn_lbl.setText("")
 
-    def _toggle_auto_levels(self) -> None:
-        if self._auto_btn.isChecked():
-            from steps.step_autocolor import _auto_color
-            corrected = _auto_color(self._orig_bgr)
-            self._canvas.set_display_image(corrected)
-            self._auto_btn.setText("✓ Auto niveaux actif (aperçu)")
-            self._auto_levels_active = True
-        else:
-            self._canvas.set_display_image(self._orig_bgr)
-            self._auto_btn.setText("📐  Auto niveaux (aperçu)")
-            self._auto_levels_active = False
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # Dialogue
 # ══════════════════════════════════════════════════════════════════════════════
@@ -687,8 +651,7 @@ class WBPickerDialog(QDialog):
         self.setMinimumSize(900, 600)
         self.resize(1100, 750)
 
-        self._orig_bgr             = image_bgr.copy()
-        self._auto_levels_active   = False
+        self._orig_bgr = image_bgr.copy()
 
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -793,18 +756,6 @@ class WBPickerDialog(QDialog):
         btn_clear.clicked.connect(self._clear_pick)
         self._style(btn_clear)
         sl.addWidget(btn_clear)
-        sl.addWidget(self._hline())
-
-        # Bouton auto-niveaux
-        self._auto_btn = QPushButton("📐  Auto niveaux (aperçu)")
-        self._auto_btn.setCheckable(True)
-        self._auto_btn.clicked.connect(self._toggle_auto_levels)
-        self._style(self._auto_btn)
-        sl.addWidget(self._auto_btn)
-
-        lbl_auto_info = QLabel("Aperçu seulement — les\ncoordonnées conservent\nleurs valeurs d'origine.")
-        lbl_auto_info.setStyleSheet("color:#556; font-size:9px;")
-        sl.addWidget(lbl_auto_info)
 
         sl.addStretch()
         sl.addWidget(self._hline())
@@ -913,20 +864,6 @@ class WBPickerDialog(QDialog):
         self._pick_info_lbl.setText("Aucun")
         self._muls_lbl.setText("")
         self._warn_lbl.setText("")
-
-    def _toggle_auto_levels(self) -> None:
-        if self._auto_btn.isChecked():
-            # Activer : calculer et afficher la version auto-niveaux
-            from steps.step_autocolor import _auto_color
-            corrected = _auto_color(self._orig_bgr)
-            self._canvas.set_display_image(corrected)
-            self._auto_btn.setText("✓ Auto niveaux actif (aperçu)")
-            self._auto_levels_active = True
-        else:
-            # Desactiver : revenir a l'image originale
-            self._canvas.set_display_image(self._orig_bgr)
-            self._auto_btn.setText("📐  Auto niveaux (aperçu)")
-            self._auto_levels_active = False
 
     # ── Resultat ──────────────────────────────────────────────────────────────
 

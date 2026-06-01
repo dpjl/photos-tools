@@ -2,7 +2,7 @@
 
 Layout ::
 
-    ┌── Toolbar: [Sortie: /...][Parcourir][▶ Lancer la sélection][↓ Appliquer à toutes][⚡ Lancer le batch] ───────┐
+    ┌── Toolbar: [Sortie: /...][Parcourir][▶ Lancer la sélection][⚡ Lancer le batch] ─────────────────────────────┐
     ├────────── BatchThumbnailStrip ──────────────────────────────────────────────┤
     │ StepListWidget  │       ImageView (SyncedImageView)     │  QTabWidget      │
     │ (≈260 px)       │                                       │  [Masque][Blanc] │
@@ -169,6 +169,7 @@ class BatchWindow(
 
         if self._session.images:
             self._strip.load_images([c.file_path for c in self._session.images])
+            self._refresh_all_strip_thumbs()
 
     def _build_toolbar(self) -> QWidget:
         bar = QWidget()
@@ -208,14 +209,6 @@ class BatchWindow(
         )
         self._selection_btn.clicked.connect(self._run_on_selection)
         lay.addWidget(self._selection_btn)
-
-        self._apply_btn = QPushButton("↓  Appliquer à toutes")
-        self._style_btn(self._apply_btn)
-        self._apply_btn.setToolTip(
-            "Propager les paramètres de l'image courante vers les images non personnalisées"
-        )
-        self._apply_btn.clicked.connect(self._apply_to_all_uncustomized)
-        lay.addWidget(self._apply_btn)
 
         self._batch_btn = QPushButton("⚡  Lancer le batch")
         self._style_btn(self._batch_btn, accent=True)
@@ -473,6 +466,39 @@ class BatchWindow(
             return None
         return mgr.load_image(exports[-1])
 
+    def _refresh_all_strip_thumbs(self) -> None:
+        """Met à jour les vignettes batch depuis les exports existants."""
+        if not self._session.output_dir:
+            return
+        for cfg in self._session.images:
+            self._refresh_strip_thumb(cfg, restore_original=False)
+
+    def _refresh_strip_thumb(
+        self,
+        cfg: BatchImageConfig,
+        restore_original: bool = True,
+    ) -> None:
+        """Affiche l'originale, le meilleur export, ou le dernier export."""
+        if not self._session.output_dir:
+            if restore_original:
+                self._strip.use_original_thumb(cfg.file_path)
+            return
+
+        mgr = self._session.get_export_manager()
+        stem, ext = os.path.splitext(cfg.filename)
+        entry = mgr.get_best_entry(stem, ext)
+        if entry is None:
+            if restore_original:
+                self._strip.use_original_thumb(cfg.file_path)
+            return
+
+        img = mgr.load_image(entry)
+        if img is None:
+            if restore_original:
+                self._strip.use_original_thumb(cfg.file_path)
+            return
+        self._strip.update_result_thumb(cfg.file_path, img)
+
     def _update_dest_view(self, cfg: BatchImageConfig, force: bool = False) -> None:
         """Met à jour la mosaïque d'exports pour l'image courante.
 
@@ -556,6 +582,7 @@ class BatchWindow(
         if self._current_cfg:
             self._update_dest_view(self._current_cfg, force=True)
             self._refresh_export_dropdown(self._current_cfg)
+            self._refresh_strip_thumb(self._current_cfg)
 
     def _on_detail_best_changed(self, entry, index) -> None:
         """Un export a été marqué comme retenu."""
@@ -567,6 +594,7 @@ class BatchWindow(
         mgr.set_best(stem, index)
         self._export_mosaic.set_best_index(index)
         self._export_detail.set_best_index(index)
+        self._refresh_strip_thumb(cfg)
 
     def _on_detail_nav_switch(self, entry) -> None:
         """Navigation vers un export via les pills de l'onglet Résultat."""

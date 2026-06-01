@@ -19,7 +19,7 @@ import numpy as np
 
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
-    QSlider, QSizePolicy, QWidget, QFrame, QCheckBox,
+    QSlider, QSizePolicy, QWidget, QFrame,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QRect
 from PyQt6.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QKeySequence, QShortcut
@@ -48,8 +48,8 @@ class MaskCanvas(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         # Image en RGB pour QImage
-        # _orig_img_rgb : image de reference (pour la detection automatique) — ne change pas
-        # _base_pixmap  : ce qui est affiche (peut etre mis a jour par auto-niveaux)
+        # _orig_img_rgb : image de reference
+        # _base_pixmap  : ce qui est affiche
         self._orig_img_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
         ih, iw = self._orig_img_rgb.shape[:2]
         self._img_w, self._img_h = iw, ih
@@ -119,7 +119,7 @@ class MaskCanvas(QWidget):
         self.update()
 
     def set_display_image(self, bgr: np.ndarray) -> None:
-        """Change l'image affichee (ex. version auto-niveaux). Le masque n'est pas affecte."""
+        """Change l'image affichee. Le masque n'est pas affecte."""
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         self._base_pixmap = self._make_rgb_pixmap(rgb)
         self._dirty = True
@@ -431,8 +431,6 @@ class MaskCanvasPanel(QWidget):
         sidebar_width:  int  = 215,
     ) -> None:
         super().__init__(parent)
-        self._orig_img_bgr       = image_bgr.copy()
-        self._auto_levels_active = False
 
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -499,46 +497,6 @@ class MaskCanvasPanel(QWidget):
         self._style(btn_undo)
         sl.addWidget(btn_undo)
 
-        sl.addWidget(self._hline())
-
-        lbl_auto = QLabel("D\u00e9tection automatique :")
-        lbl_auto.setStyleSheet("color:#bbb; font-size:11px;")
-        sl.addWidget(lbl_auto)
-
-        lbl_sens = QLabel("Sensibilit\u00e9 :")
-        lbl_sens.setStyleSheet("color:#789; font-size:10px;")
-        sl.addWidget(lbl_sens)
-
-        self._sens_slider = QSlider(Qt.Orientation.Horizontal)
-        self._sens_slider.setRange(0, 100)
-        self._sens_slider.setValue(50)
-        sl.addWidget(self._sens_slider)
-
-        self._add_cb = QCheckBox("Ajouter au masque existant")
-        self._add_cb.setStyleSheet(
-            "QCheckBox { color:#999; font-size:10px; }"
-            "QCheckBox::indicator { width:13px; height:13px; }"
-        )
-        self._add_cb.setChecked(False)
-        sl.addWidget(self._add_cb)
-
-        btn_detect = QPushButton("\u26a1  D\u00e9tecter artefacts")
-        btn_detect.clicked.connect(self._run_auto_detect)
-        self._style(btn_detect, accent=True)
-        sl.addWidget(btn_detect)
-        sl.addWidget(self._hline())
-
-        self._auto_btn = QPushButton("\U0001f4d0  Auto niveaux (aper\u00e7u)")
-        self._auto_btn.setCheckable(True)
-        self._auto_btn.clicked.connect(self._toggle_auto_levels)
-        self._style(self._auto_btn)
-        sl.addWidget(self._auto_btn)
-
-        lbl_auto_note = QLabel(
-            "Aper\u00e7u seulement \u2014 le masque\nreste dans les coord. d'origine."
-        )
-        lbl_auto_note.setStyleSheet("color:#556; font-size:9px;")
-        sl.addWidget(lbl_auto_note)
         sl.addStretch()
 
         if show_ok_cancel:
@@ -566,11 +524,6 @@ class MaskCanvasPanel(QWidget):
         initial_mask: np.ndarray | None = None,
     ) -> None:
         """Change l'image affichée (mode batch — changement de photo)."""
-        self._orig_img_bgr = image_bgr.copy()
-        if self._auto_levels_active:
-            self._auto_btn.setChecked(False)
-            self._auto_btn.setText("\U0001f4d0  Auto niveaux (aper\u00e7u)")
-            self._auto_levels_active = False
         self._canvas.reset_image(image_bgr, initial_mask)
 
     # ── Helpers UI ────────────────────────────────────────────────────────────
@@ -609,28 +562,6 @@ class MaskCanvasPanel(QWidget):
         self._brush_slider.setValue(val)
         self._brush_slider.blockSignals(False)
         self._brush_val_lbl.setText(f"{val} px")
-
-    def _run_auto_detect(self) -> None:
-        from steps.step_inpaint import _detect_artifacts
-        sensitivity = self._sens_slider.value()
-        img_bgr     = cv2.cvtColor(self._canvas._orig_img_rgb, cv2.COLOR_RGB2BGR)
-        auto_mask   = _detect_artifacts(img_bgr, sensitivity)
-        if self._add_cb.isChecked():
-            auto_mask = np.maximum(self._canvas.get_mask(), auto_mask)
-        self._canvas.set_mask(auto_mask)
-
-    def _toggle_auto_levels(self) -> None:
-        if self._auto_btn.isChecked():
-            from steps.step_autocolor import _auto_color
-            corrected = _auto_color(self._orig_img_bgr)
-            self._canvas.set_display_image(corrected)
-            self._auto_btn.setText("\u2713 Auto niveaux actif (aper\u00e7u)")
-            self._auto_levels_active = True
-        else:
-            self._canvas.set_display_image(self._orig_img_bgr)
-            self._auto_btn.setText("\U0001f4d0  Auto niveaux (aper\u00e7u)")
-            self._auto_levels_active = False
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Dialogue éditeur
