@@ -3,6 +3,7 @@
 Indicateurs visuels :
   - Bordure bleue        : image sélectionnée (navigation)
   - Case bleue bas-gauche: incluse dans la sélection d'exécution
+  - Badge doré           : export retenu utilisé comme miniature
   - Point orange         : paramètres personnalisés
   - Check vert           : image traitée et sauvegardée
   - Spinner              : image en cours de traitement
@@ -63,6 +64,35 @@ class _ThumbLoader(QObject):
         return thread
 
 
+class _MappedThumbLoader(QObject):
+    """Charge des miniatures depuis des chemins différents des cartes."""
+
+    thumb_ready = pyqtSignal(str, object, bool)   # (file_path, QPixmap, is_best)
+
+    def __init__(self, items: list[tuple[str, str, bool]]) -> None:
+        super().__init__()
+        self._items = items
+        self._cancel = False
+
+    def cancel(self) -> None:
+        self._cancel = True
+
+    def run(self) -> None:
+        for file_path, image_path, is_best in self._items:
+            if self._cancel:
+                break
+            pix = _load_thumbnail(image_path)
+            self.thumb_ready.emit(file_path, pix, is_best)
+
+    def start_in_thread(self) -> QThread:
+        thread = QThread()
+        self.moveToThread(thread)
+        thread.started.connect(self.run)
+        thread.start()
+        self._thread = thread
+        return thread
+
+
 def _load_thumbnail(path: str) -> QPixmap:
     """Charge et redimensionne une image en miniature (128×96 max)."""
     try:
@@ -107,6 +137,7 @@ class BatchThumbCard(QWidget):
         self._customized  = False
         self._done        = False
         self._running     = False
+        self._best_thumb  = False
 
         self.setFixedSize(_CARD_W, _CARD_H)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -124,6 +155,18 @@ class BatchThumbCard(QWidget):
         self._img_lbl.setStyleSheet("background: #1a1a2e;")
         layout.addWidget(self._img_lbl)
 
+        self._best_badge = QLabel("★", self)
+        self._best_badge.setFixedSize(24, 24)
+        self._best_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._best_badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._best_badge.setStyleSheet(
+            "background:#d4a03a; color:#fff; border:2px solid #111124;"
+            " border-radius:12px; font-size:15px; font-weight:700;"
+        )
+        self._best_badge.setToolTip("Export retenu")
+        self._best_badge.setVisible(False)
+        self._best_badge.move(8, 8)
+
         # Nom de fichier (tronqué)
         name = os.path.basename(file_path)
         if len(name) > 18:
@@ -138,12 +181,18 @@ class BatchThumbCard(QWidget):
 
     # ── API ────────────────────────────────────────────────────────────────────
 
-    def set_pixmap(self, pix: QPixmap) -> None:
+    def set_pixmap(self, pix: QPixmap, best: Optional[bool] = None) -> None:
         self._pixmap = pix
+        if best is not None:
+            self._best_thumb = best
+            self._best_badge.setVisible(best)
+            if best:
+                self._best_badge.raise_()
         self._img_lbl.setPixmap(
             pix.scaled(_THUMB_W, _THUMB_H, Qt.AspectRatioMode.KeepAspectRatio,
                        Qt.TransformationMode.SmoothTransformation)
         )
+        self.update()
 
     def set_selected(self, v: bool) -> None:
         self._selected = v
@@ -209,6 +258,12 @@ class BatchThumbCard(QWidget):
             p.drawEllipse(4, 4, _CARD_W - 8, _THUMB_H)
 
         p.end()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._best_badge.move(8, 8)
+        if self._best_thumb:
+            self._best_badge.raise_()
 
     def _refresh_style(self) -> None:
         if self._running:
@@ -290,19 +345,24 @@ class BatchThumbnailStrip(QWidget):
         self._selected_path: Optional[str] = None
         self._run_paths: set[str] = set()              # sélection pour exécution
         self._override_pixmaps: dict[str, QPixmap] = {}
+        self._override_best: dict[str, bool] = {}
 
         self._loader: Optional[_ThumbLoader] = None
         self._loader_thread: Optional[QThread] = None
+        self._override_loader: Optional[_MappedThumbLoader] = None
+        self._override_loader_thread: Optional[QThread] = None
 
     # ── API ────────────────────────────────────────────────────────────────────
 
     def load_images(self, file_paths: list[str]) -> None:
         """Peuple la bande avec les fichiers donnés et lance le chargement."""
         self._stop_loader()
+        self._stop_override_loader()
         self._cards.clear()
         self._selected_path = None
         self._run_paths.clear()
         self._override_pixmaps.clear()
+        self._override_best.clear()
 
         # Nettoyer le layout
         while self._row.count() > 1:
@@ -365,7 +425,12 @@ class BatchThumbnailStrip(QWidget):
         if file_path in self._cards:
             self._cards[file_path].set_running(v)
 
-    def update_result_thumb(self, file_path: str, img: np.ndarray) -> None:
+    def update_result_thumb(
+        self,
+        file_path: str,
+        img: np.ndarray,
+        is_best: bool = False,
+    ) -> None:
         """Met à jour la miniature avec l'image résultat."""
         if file_path not in self._cards:
             return
@@ -378,13 +443,27 @@ class BatchThumbnailStrip(QWidget):
         qimg  = QImage(data.tobytes(), nw, nh, nw * 3, QImage.Format.Format_RGB888)
         pix = QPixmap.fromImage(qimg)
         self._override_pixmaps[file_path] = pix
-        self._cards[file_path].set_pixmap(pix)
+        self._override_best[file_path] = is_best
+        self._cards[file_path].set_pixmap(pix, best=is_best)
+
+    def update_result_thumbs_from_paths(
+        self,
+        items: list[tuple[str, str, bool]],
+    ) -> None:
+        """Charge des miniatures résultat en arrière-plan."""
+        self._stop_override_loader()
+        if not items:
+            return
+        self._override_loader = _MappedThumbLoader(items)
+        self._override_loader.thumb_ready.connect(self._on_override_thumb_ready)
+        self._override_loader_thread = self._override_loader.start_in_thread()
 
     def use_original_thumb(self, file_path: str) -> None:
         """Réaffiche l'image originale pour une carte."""
         self._override_pixmaps.pop(file_path, None)
+        self._override_best.pop(file_path, None)
         if file_path in self._cards:
-            self._cards[file_path].set_pixmap(_load_thumbnail(file_path))
+            self._cards[file_path].set_pixmap(_load_thumbnail(file_path), best=False)
 
     def count(self) -> int:
         return len(self._cards)
@@ -440,8 +519,20 @@ class BatchThumbnailStrip(QWidget):
     def _on_thumb_ready(self, file_path: str, pix: QPixmap) -> None:
         if file_path in self._cards:
             self._cards[file_path].set_pixmap(
-                self._override_pixmaps.get(file_path, pix)
+                self._override_pixmaps.get(file_path, pix),
+                best=self._override_best.get(file_path, False),
             )
+
+    def _on_override_thumb_ready(
+        self,
+        file_path: str,
+        pix: QPixmap,
+        is_best: bool,
+    ) -> None:
+        if file_path in self._cards:
+            self._override_pixmaps[file_path] = pix
+            self._override_best[file_path] = is_best
+            self._cards[file_path].set_pixmap(pix, best=is_best)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -460,6 +551,16 @@ class BatchThumbnailStrip(QWidget):
         self._loader        = None
         self._loader_thread = None
 
+    def _stop_override_loader(self) -> None:
+        if self._override_loader:
+            self._override_loader.cancel()
+        if self._override_loader_thread:
+            self._override_loader_thread.quit()
+            self._override_loader_thread.wait(500)
+        self._override_loader = None
+        self._override_loader_thread = None
+
     def closeEvent(self, event) -> None:
         self._stop_loader()
+        self._stop_override_loader()
         super().closeEvent(event)

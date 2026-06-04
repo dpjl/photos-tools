@@ -143,6 +143,74 @@ class ExportManager:
 
         return sorted(entries.values(), key=lambda e: e.index)
 
+    def select_thumbnail_exports(
+        self,
+        sources: list[tuple[str, str]],
+    ) -> dict[tuple[str, str], tuple[ExportEntry, bool]]:
+        """Sélectionne les exports à afficher en vignettes en un seul scan.
+
+        Pour chaque ``(stem, ext)``, retourne l'export retenu si disponible,
+        sinon le dernier export. Le booléen indique si l'export est retenu.
+        """
+        if not os.path.isdir(self.output_dir):
+            return {}
+
+        keys_by_stem: dict[str, list[tuple[str, str]]] = {}
+        for stem, ext in sources:
+            keys_by_stem.setdefault(stem, []).append((stem, ext))
+        for keys in keys_by_stem.values():
+            keys.sort(key=lambda item: len(item[1]), reverse=True)
+
+        candidates: dict[tuple[str, str], dict[int, str]] = {
+            (stem, ext): {} for stem, ext in sources
+        }
+        marker = ".export."
+
+        try:
+            for item in os.scandir(self.output_dir):
+                if not item.is_file() or marker not in item.name:
+                    continue
+                stem, suffix = item.name.rsplit(marker, 1)
+                for key in keys_by_stem.get(stem, []):
+                    ext = key[1]
+                    if not suffix.endswith(ext):
+                        continue
+                    num_str = suffix[: -len(ext)] if ext else suffix
+                    try:
+                        index = int(num_str)
+                    except ValueError:
+                        continue
+                    if index > 0:
+                        candidates[key][index] = item.path
+                    break
+        except OSError:
+            return {}
+
+        best_map = self._load_best_map()
+        selected: dict[tuple[str, str], tuple[ExportEntry, bool]] = {}
+        for key, by_index in candidates.items():
+            if not by_index:
+                continue
+            stem, ext = key
+            best_idx = best_map.get(stem)
+            if best_idx in by_index:
+                index = best_idx
+                is_best = True
+            else:
+                index = max(by_index)
+                is_best = False
+            selected[key] = (
+                ExportEntry(
+                    index=index,
+                    image_path=by_index[index],
+                    recipe_path=os.path.join(
+                        self.output_dir, _recipe_name(stem, index)
+                    ),
+                ),
+                is_best,
+            )
+        return selected
+
     # ── Index ─────────────────────────────────────────────────────────────────
 
     def next_index(self, stem: str, ext: str) -> int:

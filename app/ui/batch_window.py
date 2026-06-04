@@ -470,8 +470,16 @@ class BatchWindow(
         """Met à jour les vignettes batch depuis les exports existants."""
         if not self._session.output_dir:
             return
+        mgr = self._session.get_export_manager()
+        sources = [os.path.splitext(cfg.filename) for cfg in self._session.images]
+        selected = mgr.select_thumbnail_exports(sources)
+        items = []
         for cfg in self._session.images:
-            self._refresh_strip_thumb(cfg, restore_original=False)
+            key = os.path.splitext(cfg.filename)
+            entry, is_best = selected.get(key, (None, False))
+            if entry is not None:
+                items.append((cfg.file_path, entry.image_path, is_best))
+        self._strip.update_result_thumbs_from_paths(items)
 
     def _refresh_strip_thumb(
         self,
@@ -485,8 +493,7 @@ class BatchWindow(
             return
 
         mgr = self._session.get_export_manager()
-        stem, ext = os.path.splitext(cfg.filename)
-        entry = mgr.get_best_entry(stem, ext)
+        entry, is_best = self._strip_export_for_cfg(mgr, cfg)
         if entry is None:
             if restore_original:
                 self._strip.use_original_thumb(cfg.file_path)
@@ -497,7 +504,21 @@ class BatchWindow(
             if restore_original:
                 self._strip.use_original_thumb(cfg.file_path)
             return
-        self._strip.update_result_thumb(cfg.file_path, img)
+        self._strip.update_result_thumb(cfg.file_path, img, is_best=is_best)
+
+    @staticmethod
+    def _strip_export_for_cfg(mgr: ExportManager, cfg: BatchImageConfig):
+        """Retourne l'export à utiliser pour la miniature et s'il est retenu."""
+        stem, ext = os.path.splitext(cfg.filename)
+        exports = mgr.list_exports(stem, ext)
+        if not exports:
+            return None, False
+        best_idx = mgr.get_best_index(stem)
+        if best_idx is not None:
+            for entry in exports:
+                if entry.index == best_idx:
+                    return entry, True
+        return exports[-1], False
 
     def _update_dest_view(self, cfg: BatchImageConfig, force: bool = False) -> None:
         """Met à jour la mosaïque d'exports pour l'image courante.
