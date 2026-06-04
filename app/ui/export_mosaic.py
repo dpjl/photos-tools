@@ -185,6 +185,8 @@ class ExportMosaicView(QWidget):
         self._fullscreen_entry: Optional[ExportEntry] = None
         self._best_index: Optional[int] = None
         self._image_cache: dict[int, np.ndarray] = {}  # index → ndarray (BGR)
+        self._grid_rows = 0
+        self._grid_cols = 0
 
         # Layout empilé : 0=mosaïque, 1=plein format
         self._stack = QStackedLayout(self)
@@ -289,11 +291,14 @@ class ExportMosaicView(QWidget):
                 w.hide()
                 w.deleteLater()
         self._tiles.clear()
+        self._reset_grid_constraints()
 
         n = len(self._entries)
         if n == 0:
             self._empty_label.setVisible(True)
             self._grid_layout.addWidget(self._empty_label, 0, 0)
+            self._grid_rows = 1
+            self._grid_cols = 1
             return
         self._empty_label.setVisible(False)
         if self._empty_label.parent() is self._mosaic_page:
@@ -320,6 +325,8 @@ class ExportMosaicView(QWidget):
             self._grid_layout.setRowStretch(r, 1)
         for c in range(cols):
             self._grid_layout.setColumnStretch(c, 1)
+        self._grid_rows = rows
+        self._grid_cols = cols
 
         # Connecter les peers pour synchronisation zoom/pan
         viewers = [tile.viewer for tile in self._tiles]
@@ -337,6 +344,17 @@ class ExportMosaicView(QWidget):
             self._selected_entry = first
             self._tiles[0].set_selected(True)
             self.export_selected.emit(first)
+
+    def _reset_grid_constraints(self):
+        """Réinitialise les lignes/colonnes laissées par la grille précédente."""
+        for r in range(self._grid_rows):
+            self._grid_layout.setRowStretch(r, 0)
+            self._grid_layout.setRowMinimumHeight(r, 0)
+        for c in range(self._grid_cols):
+            self._grid_layout.setColumnStretch(c, 0)
+            self._grid_layout.setColumnMinimumWidth(c, 0)
+        self._grid_rows = 0
+        self._grid_cols = 0
 
     def _load_image_async(self, entry: ExportEntry):
         if not os.path.exists(entry.image_path):
@@ -441,4 +459,3 @@ class ExportMosaicView(QWidget):
             self.exit_fullscreen()
             return
         super().keyPressEvent(event)
-
