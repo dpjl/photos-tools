@@ -47,6 +47,7 @@ class FileIOMixin:
         # Vider la pile undo et resynchroniser le snapshot
         self._undo_stack.clear()
         self._params_snapshot = self._ctrl.step_list.get_all_params()
+        self._update_result_diff_indicator()
 
         # Réinitialiser l'overlay si actif
         self._overlay_step = None

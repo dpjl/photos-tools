@@ -188,8 +188,9 @@ class RunMixin:
                 key="batch_progress",
             )
 
+        saved_entry = None
         try:
-            self._session.save_result(cfg, result_img)
+            saved_entry = self._session.save_result(cfg, result_img)
         except Exception as exc:
             self._statusbar.showMessage(f"Erreur sauvegarde : {exc}")
 
@@ -199,6 +200,8 @@ class RunMixin:
             if self._tabs.currentIndex() == _TAB_RESULT:
                 self._update_dest_view(cfg, force=True)
             self._refresh_if_diff_tab()
+            if saved_entry is not None:
+                self._update_result_diff_indicator()
 
         # Libérer le cache GPU entre chaque image du batch
         try:
@@ -235,3 +238,5 @@ class RunMixin:
             self._output_lbl.setText(path)
             self._output_lbl.setToolTip(path)
             self._session.save_session_meta()
+            self._refresh_retained_count()
+            self._update_result_diff_indicator()

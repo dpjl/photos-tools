@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer, QSettings
 from PyQt6.QtGui import QKeySequence, QShortcut, QAction, QUndoStack
 
+from core.config_diff import changed_step_details
 from core.history import HistoryManager
 from core.pipeline import PipelineWorker
 from steps import ALL_STEPS
@@ -102,6 +103,7 @@ class MainApp(
         self._build_ui()
         apply_dark_theme(self)
         self._setup_shortcuts()
+        self._update_result_diff_indicator()
 
     # ══════════════════════════════════════════════════════════════════════════
     # Construction de l'UI
@@ -304,8 +306,10 @@ class MainApp(
             return
         recipe = entry.recipe_data
         if "step_order" in recipe:
-            self._ctrl.step_list.set_order(recipe["step_order"])
+            self._step_order = list(recipe["step_order"])
+            self._ctrl.step_list.set_order(self._step_order)
         if "step_enabled" in recipe:
+            self._step_enabled.update(recipe["step_enabled"])
             for sid, val in recipe["step_enabled"].items():
                 panel = self._ctrl.step_list.get_panel(sid)
                 if panel:
@@ -316,8 +320,38 @@ class MainApp(
                 if panel:
                     panel.set_params(params)
         self._params_snapshot = self._ctrl.step_list.get_all_params()
+        self._update_result_diff_indicator()
         self._status_bar.showMessage("Configuration restaurée depuis l'export.")
 
     def _on_single_deleted(self, entry):
         self._refresh_single_exports()
 
+    def _update_result_diff_indicator(self) -> None:
+        """Compare le panneau courant au dernier run terminé."""
+        latest = self._history.latest()
+        if latest is None:
+            self._ctrl.step_list.set_result_diff(set())
+            self._ctrl.set_result_diff_state(False, 0)
+            return
+
+        changed = changed_step_details(
+            self._ctrl.step_list.get_order(),
+            self._ctrl.step_list.get_enabled(),
+            self._ctrl.step_list.get_all_params(),
+            latest.step_order,
+            latest.step_enabled,
+            latest.step_params,
+            self._param_labels_by_step(),
+        )
+        self._ctrl.step_list.set_result_diff(changed)
+        self._ctrl.set_result_diff_state(True, len(changed))
+
+    def _param_labels_by_step(self) -> dict[str, dict[str, str]]:
+        """Retourne les libellés UI des paramètres, groupés par étape."""
+        labels: dict[str, dict[str, str]] = {}
+        for step in ALL_STEPS:
+            labels[step.id] = {
+                pdef["key"]: pdef.get("label", pdef["key"])
+                for pdef in getattr(step, "param_defs", [])
+            }
+        return labels

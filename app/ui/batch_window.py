@@ -36,6 +36,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer, QSettings, pyqtSignal
 from PyQt6.QtGui import QCloseEvent, QUndoStack, QKeySequence, QShortcut
 
+from core.config_diff import changed_step_details
 from core.pipeline import PipelineWorker
 from core.batch import BatchSession, BatchImageConfig
 from steps import ALL_STEPS
@@ -170,6 +171,8 @@ class BatchWindow(
         if self._session.images:
             self._strip.load_images([c.file_path for c in self._session.images])
             self._refresh_all_strip_thumbs()
+        self._refresh_retained_count()
+        self._update_result_diff_indicator()
 
     def _build_toolbar(self) -> QWidget:
         bar = QWidget()
@@ -199,6 +202,12 @@ class BatchWindow(
         self._toggle_strip_btn.toggled.connect(self._on_strip_visibility_toggled)
         lay.addWidget(self._toggle_strip_btn)
         self._sync_strip_toggle_button()
+
+        self._retained_count_lbl = QLabel()
+        self._retained_count_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._retained_count_lbl.setMinimumWidth(138)
+        lay.addWidget(self._retained_count_lbl)
+        self._refresh_retained_count()
 
         lay.addStretch()
 
@@ -292,6 +301,11 @@ class BatchWindow(
         hdr_lbl = QLabel("Étapes — par image")
         hdr_lbl.setStyleSheet("color:#ddd; font-size:12px; font-weight:700;")
         hdr_lay.addWidget(hdr_lbl, stretch=1)
+
+        self._recipe_diff_lbl = QLabel("Aucun résultat")
+        self._recipe_diff_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hdr_lay.addWidget(self._recipe_diff_lbl)
+        self._set_recipe_diff_state(False, 0)
 
         self._reload_recipe_btn = QPushButton("↺")
         self._reload_recipe_btn.setFixedSize(24, 24)
@@ -595,6 +609,7 @@ class BatchWindow(
         if cfg.wb_patch_radius:
             self._wb_panel._rad_slider.setValue(cfg.wb_patch_radius)
             self._wb_panel._rad_val_lbl.setText(f"{cfg.wb_patch_radius} px")
+        self._update_result_diff_indicator()
         self._statusbar.showMessage("Configuration restaurée depuis l'export.")
         self._schedule_preview_update()
 
@@ -604,6 +619,8 @@ class BatchWindow(
             self._update_dest_view(self._current_cfg, force=True)
             self._refresh_export_dropdown(self._current_cfg)
             self._refresh_strip_thumb(self._current_cfg)
+            self._refresh_retained_count()
+            self._update_result_diff_indicator()
 
     def _on_detail_best_changed(self, entry, index) -> None:
         """Un export a été marqué comme retenu."""
@@ -616,6 +633,7 @@ class BatchWindow(
         self._export_mosaic.set_best_index(index)
         self._export_detail.set_best_index(index)
         self._refresh_strip_thumb(cfg)
+        self._refresh_retained_count()
 
     def _on_detail_nav_switch(self, entry) -> None:
         """Navigation vers un export via les pills de l'onglet Résultat."""
@@ -698,6 +716,104 @@ class BatchWindow(
         self._statusbar.showMessage(
             f"Export terminé : {exported}/{len(items)} images JPEG → {dest}"
         )
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Indicateurs de configuration
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _refresh_retained_count(self) -> None:
+        """Met à jour le compteur visuel des photos retenues."""
+        if not hasattr(self, "_retained_count_lbl"):
+            return
+        total = len(self._session.images)
+        retained = 0
+        if self._session.output_dir:
+            mgr = self._session.get_export_manager()
+            sources = [os.path.splitext(cfg.filename) for cfg in self._session.images]
+            selected = mgr.select_thumbnail_exports(sources)
+            retained = sum(1 for _, is_best in selected.values() if is_best)
+
+        self._retained_count_lbl.setText(f"★  {retained} / {total} retenue(s)")
+        self._retained_count_lbl.setToolTip(
+            "Nombre de photos marquées comme retenues dans le batch"
+        )
+        complete = total > 0 and retained == total
+        bg = "#173322" if complete else "#3a2a12"
+        fg = "#a8efb3" if complete else "#ffd18a"
+        border = "#347a4a" if complete else "#8f6a24"
+        self._retained_count_lbl.setStyleSheet(
+            f"color:{fg}; background:{bg}; border:1px solid {border};"
+            " border-radius:5px; padding:5px 10px; font-size:12px;"
+            " font-weight:800;"
+        )
+
+    def _latest_export_recipe_for_cfg(self, cfg: BatchImageConfig) -> Optional[dict]:
+        """Retourne la recette du dernier export de l'image courante."""
+        if not self._session.output_dir:
+            return None
+        mgr = self._session.get_export_manager()
+        stem, ext = os.path.splitext(cfg.filename)
+        exports = mgr.list_exports(stem, ext)
+        if not exports:
+            return None
+        return mgr.load_recipe(exports[-1])
+
+    def _update_result_diff_indicator(self) -> None:
+        """Compare les étapes courantes au dernier résultat de l'image."""
+        if not hasattr(self, "_step_list"):
+            return
+        cfg = self._current_cfg
+        recipe = self._latest_export_recipe_for_cfg(cfg) if cfg is not None else None
+        if recipe is None:
+            self._step_list.set_result_diff(set())
+            self._set_recipe_diff_state(False, 0)
+            return
+
+        changed = changed_step_details(
+            self._step_list.get_order(),
+            self._step_list.get_enabled(),
+            self._step_list.get_all_params(),
+            list(recipe.get("step_order", [])),
+            dict(recipe.get("step_enabled", {})),
+            dict(recipe.get("step_params", {})),
+            self._param_labels_by_step(),
+        )
+        self._step_list.set_result_diff(changed)
+        self._set_recipe_diff_state(True, len(changed))
+
+    def _param_labels_by_step(self) -> dict[str, dict[str, str]]:
+        """Retourne les libellés UI des paramètres, groupés par étape."""
+        labels: dict[str, dict[str, str]] = {}
+        for step in ALL_STEPS:
+            labels[step.id] = {
+                pdef["key"]: pdef.get("label", pdef["key"])
+                for pdef in getattr(step, "param_defs", [])
+            }
+        return labels
+
+    def _set_recipe_diff_state(self, has_result: bool, changed_count: int) -> None:
+        if not hasattr(self, "_recipe_diff_lbl"):
+            return
+        if not has_result:
+            text = "Aucun résultat"
+            style = (
+                "color:#778; background:#202038; border:1px solid #303050;"
+                " border-radius:4px; padding:2px 6px; font-size:9px;"
+            )
+        elif changed_count:
+            text = f"{changed_count} modif."
+            style = (
+                "color:#ffd18a; background:#3a2a12; border:1px solid #8f6a24;"
+                " border-radius:4px; padding:2px 6px; font-size:9px; font-weight:700;"
+            )
+        else:
+            text = "À jour"
+            style = (
+                "color:#9ee6a8; background:#163020; border:1px solid #2f6a42;"
+                " border-radius:4px; padding:2px 6px; font-size:9px; font-weight:700;"
+            )
+        self._recipe_diff_lbl.setText(text)
+        self._recipe_diff_lbl.setStyleSheet(style)
 
     # ══════════════════════════════════════════════════════════════════════════
     # Utilitaires UI

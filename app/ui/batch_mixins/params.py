@@ -24,6 +24,7 @@ class ParamsMixin:
         if not self._applying_order and self._current_cfg:
             self._current_cfg.step_order = order
             self._mark_customized()
+            self._update_result_diff_indicator()
 
     @pyqtSlot(list, list)
     def _on_order_reordered(self, old_order: list, new_order: list) -> None:
@@ -36,6 +37,7 @@ class ParamsMixin:
             if cfg:
                 cfg.step_order = order
             self._applying_order = False
+            self._update_result_diff_indicator()
         cmd = MoveStepCommand(
             step_id   = new_order[0] if new_order else "",
             old_order = old_order,
@@ -70,6 +72,7 @@ class ParamsMixin:
                     self._apply_param_silent, step_id, key, old_val, value
                 )
                 self._undo_stack.push(cmd)
+            self._update_result_diff_indicator()
 
         if step_id in _FAST_PREVIEW_IDS:
             self._schedule_preview_update()
@@ -89,6 +92,7 @@ class ParamsMixin:
                 row.set_value(val)
         if step_id in _FAST_PREVIEW_IDS:
             self._schedule_preview_update()
+        self._update_result_diff_indicator()
 
     def _flush_preset_undo(self) -> None:
         self._preset_flush_pending = False
@@ -131,6 +135,7 @@ class ParamsMixin:
                     row.set_value(value)
             if step_id in _FAST_PREVIEW_IDS:
                 self._schedule_preview_update()
+            self._update_result_diff_indicator()
         cmd = PropagateParamCommand(
             step_id, key, value,
             targets, old_vals,
@@ -169,6 +174,7 @@ class ParamsMixin:
             panel = self._step_list.get_panel(step_id)
             if panel:
                 panel.set_enabled(enabled)
+            self._update_result_diff_indicator()
 
         def _apply_enabled_ui(sid: str, val: bool) -> None:
             p = self._step_list.get_panel(sid)
@@ -208,6 +214,7 @@ class ParamsMixin:
             self._mark_customized()
         if step_id in _FAST_PREVIEW_IDS:
             self._schedule_preview_update()
+        self._update_result_diff_indicator()
         if old_val is not None and old_val != enabled:
             cmd = ToggleStepCommand(
                 self._apply_enabled_silent, step_id, old_val, enabled
@@ -224,6 +231,7 @@ class ParamsMixin:
         if self._current_cfg:
             self._current_cfg.step_enabled[step_id] = val
         self._applying_enabled = False
+        self._update_result_diff_indicator()
 
     # ── Undo / Redo ───────────────────────────────────────────────────────────
 

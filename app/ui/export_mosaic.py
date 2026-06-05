@@ -17,8 +17,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QGridLayout,
     QSizePolicy, QStackedLayout, QFrame,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QThreadPool, QRunnable, QObject, QTimer
-from PyQt6.QtGui import QMouseEvent
+from PyQt6.QtCore import Qt, pyqtSignal, QThreadPool, QRunnable, QObject, QTimer, QEvent
 
 from core.export_manager import ExportEntry
 from ui.image_view import SyncedImageView, ndarray_to_qpixmap
@@ -209,6 +208,7 @@ class ExportMosaicView(QWidget):
 
         # ── Page plein format ──
         self._full_view = SyncedImageView()
+        self._full_view.viewport().installEventFilter(self)
         self._stack.addWidget(self._full_view)
 
         self._stack.setCurrentIndex(0)
@@ -459,3 +459,15 @@ class ExportMosaicView(QWidget):
             self.exit_fullscreen()
             return
         super().keyPressEvent(event)
+
+    def eventFilter(self, obj, event):
+        """Double-clic en plein format → retour mosaïque."""
+        if obj is self._full_view.viewport():
+            if (
+                event.type() == QEvent.Type.MouseButtonDblClick
+                and event.button() == Qt.MouseButton.LeftButton
+                and self.is_fullscreen()
+            ):
+                self.exit_fullscreen()
+                return True
+        return super().eventFilter(obj, event)

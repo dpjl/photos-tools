@@ -147,3 +147,4 @@ class PipelineMixin:
         )
         # Resynchroniser le snapshot complet après le run (effective_params éventuels)
         self._params_snapshot = self._ctrl.step_list.get_all_params()
+        self._update_result_diff_indicator()

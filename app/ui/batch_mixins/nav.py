@@ -85,6 +85,7 @@ class NavMixin:
         self._schedule_preview_update()
         # Actualiser les onglets diff si actifs
         self._refresh_if_diff_tab()
+        self._update_result_diff_indicator()
 
     # ── Sauvegarde de l'état ──────────────────────────────────────────────────
 
@@ -102,6 +103,7 @@ class NavMixin:
         self._undo_stack.clear()
         self._preset_buf.clear()
         self._preset_flush_pending = False
+        self._update_result_diff_indicator()
 
     def _sync_editor_state(self) -> None:
         """Copie l'état des panneaux éditeurs dans _current_cfg (mémoire, pas disque)."""

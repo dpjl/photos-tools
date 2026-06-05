@@ -47,6 +47,12 @@ class ControlPanel(QWidget):
         title = QLabel("Pipeline")
         title.setStyleSheet("color: #ddd; font-size: 13px; font-weight: 700;")
         top_layout.addWidget(title)
+
+        self._result_diff_lbl = QLabel("Aucun résultat")
+        self._result_diff_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        top_layout.addWidget(self._result_diff_lbl)
+        self.set_result_diff_state(False, 0)
+
         top_layout.addStretch()
 
         self._run_btn = QPushButton("▶  Lancer")
@@ -97,3 +103,26 @@ class ControlPanel(QWidget):
     def set_running(self, running: bool):
         self._run_btn.setEnabled(not running)
         self._stop_btn.setVisible(running)
+
+    def set_result_diff_state(self, has_result: bool, changed_count: int) -> None:
+        """Affiche un résumé compact des changements depuis le dernier résultat."""
+        if not has_result:
+            text = "Aucun résultat"
+            style = (
+                "color:#778; background:#202038; border:1px solid #303050;"
+                " border-radius:4px; padding:3px 7px; font-size:10px;"
+            )
+        elif changed_count:
+            text = f"{changed_count} modifiée(s)"
+            style = (
+                "color:#ffd18a; background:#3a2a12; border:1px solid #8f6a24;"
+                " border-radius:4px; padding:3px 7px; font-size:10px; font-weight:700;"
+            )
+        else:
+            text = "À jour"
+            style = (
+                "color:#9ee6a8; background:#163020; border:1px solid #2f6a42;"
+                " border-radius:4px; padding:3px 7px; font-size:10px; font-weight:700;"
+            )
+        self._result_diff_lbl.setText(text)
+        self._result_diff_lbl.setStyleSheet(style)

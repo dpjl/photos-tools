@@ -110,6 +110,8 @@ class StepPanel(QWidget):
         self._param_rows: dict[str, ParamRow] = {}
         self._expanded  = False
         self._loading_preset = False   # True pendant le chargement silencieux d'un preset
+        self._changed_since_result = False
+        self._change_reasons: list[str] = []
 
         self.setObjectName("StepPanel")
         self._build_ui()
@@ -191,6 +193,18 @@ class StepPanel(QWidget):
         self._name_lbl = QLabel(self._step.name)
         self._name_lbl.setStyleSheet("color: #ddd; font-size: 12px; font-weight: 600;")
         hdr_layout.addWidget(self._name_lbl, stretch=1)
+
+        # Indicateur de changement depuis le dernier résultat
+        self._diff_lbl = QLabel("●")
+        self._diff_lbl.setVisible(False)
+        self._diff_lbl.setFixedWidth(14)
+        self._diff_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._diff_lbl.setStyleSheet(
+            "color: #f0b64c; background: transparent; border: none;"
+            " font-size: 13px; font-weight: 900;"
+        )
+        self._diff_lbl.setToolTip("Cette étape diffère du dernier résultat généré")
+        hdr_layout.addWidget(self._diff_lbl)
 
         # Statut court
         self._status_lbl = QLabel("")
@@ -332,6 +346,31 @@ class StepPanel(QWidget):
     def set_state(self, state: str, message: str = ""):
         self._state = state
         self._apply_state(state, message)
+
+    def set_changed_since_result(
+        self,
+        changed: bool,
+        reasons: Optional[list[str]] = None,
+    ) -> None:
+        """Affiche un badge si l'étape diffère du dernier résultat."""
+        reasons = list(reasons or [])
+        if self._changed_since_result == changed and self._change_reasons == reasons:
+            return
+        self._changed_since_result = changed
+        self._change_reasons = reasons
+        self._diff_lbl.setVisible(changed)
+        self._diff_lbl.setToolTip(self._build_diff_tooltip(reasons))
+
+    @staticmethod
+    def _build_diff_tooltip(reasons: list[str]) -> str:
+        if not reasons:
+            return "Modifié depuis le dernier résultat."
+        shown = reasons[:6]
+        lines = ["Pas encore généré avec ces changements :"]
+        lines.extend(f"- {reason}" for reason in shown)
+        if len(reasons) > len(shown):
+            lines.append(f"- … +{len(reasons) - len(shown)} autre(s)")
+        return "\n".join(lines)
 
     def is_enabled(self) -> bool:
         return self._enable_cb.isChecked()
@@ -529,6 +568,15 @@ class StepListWidget(QWidget):
         for sid, state in states.items():
             if sid in self._panels:
                 self._panels[sid].set_state(state)
+
+    def set_result_diff(self, changed_steps) -> None:
+        """Met à jour les badges 'modifié' par rapport au dernier résultat."""
+        if isinstance(changed_steps, dict):
+            details = changed_steps
+        else:
+            details = {sid: [] for sid in changed_steps}
+        for sid, panel in self._panels.items():
+            panel.set_changed_since_result(sid in details, details.get(sid, []))
 
     # ── Drag ────────────────────────────────────────────────────────────────
 

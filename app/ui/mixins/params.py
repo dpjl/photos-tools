@@ -14,6 +14,7 @@ class ParamsMixin:
         if not self._applying_order:
             self._step_order = new_order
         self._mark_stale_from(new_order[0] if new_order else None)
+        self._update_result_diff_indicator()
 
     def _on_order_reordered(self, old_order: list[str], new_order: list[str]) -> None:
         """Push une commande undo pour le réordonnancement par drag-and-drop."""
@@ -25,6 +26,7 @@ class ParamsMixin:
             self._ctrl.step_list.set_order(order)
             self._step_order = order
             self._mark_stale_from(order[0] if order else None)
+            self._update_result_diff_indicator()
             self._applying_order = False
 
         cmd = MoveStepCommand(
@@ -63,6 +65,7 @@ class ParamsMixin:
             self._undo_stack.push(cmd)
 
         self._mark_stale_from(step_id)
+        self._update_result_diff_indicator()
         self._schedule_preview(step_id)
 
     def _apply_param_silent(self, step_id: str, key: str, val) -> None:
@@ -74,6 +77,7 @@ class ParamsMixin:
         if row is not None:
             row.set_value(val)  # _block=True, pas de signal
         self._params_snapshot.setdefault(step_id, {})[key] = val
+        self._update_result_diff_indicator()
         self._schedule_preview(step_id)
 
     def _flush_preset_undo(self) -> None:
@@ -99,6 +103,7 @@ class ParamsMixin:
             panel.set_state("disabled" if not enabled else "stale")
         if step_id in _FAST_PREVIEW_IDS:
             self._schedule_preview(step_id)
+        self._update_result_diff_indicator()
         # Pousser la commande undo
         if old_val is not None and old_val != enabled:
             cmd = ToggleStepCommand(
@@ -116,6 +121,7 @@ class ParamsMixin:
             panel._enable_cb.setChecked(val)
             panel._enable_cb.blockSignals(False)
             panel.set_state("disabled" if not val else "stale")
+        self._update_result_diff_indicator()
         self._applying_enabled = False
 
     def _mark_stale_from(self, step_id: Optional[str]):
