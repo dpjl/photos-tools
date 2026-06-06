@@ -338,13 +338,14 @@ class MaskCanvas(QWidget):
             self._zoom_at(event.position().toPoint(), factor)
         else:
             # Molette seule = taille du pinceau
-            step = 10 if abs(delta) >= 120 else 3
-            if delta > 0:
-                self._brush_px = min(300, self._brush_px + step)
-            else:
-                self._brush_px = max(2, self._brush_px - step)
+            if delta == 0:
+                event.accept()
+                return
+            steps = 1 if delta > 0 else -1
+            self._brush_px = max(1, min(300, self._brush_px + steps))
             self.update()
             self.brush_size_changed.emit(self._brush_px)
+        event.accept()
 
     # keyPressEvent supprimé : Ctrl+Z route via le parent (MaskEditorDialog ou BatchWindow)
 
@@ -480,7 +481,7 @@ class MaskCanvasPanel(QWidget):
         sl.addLayout(size_row)
 
         self._brush_slider = QSlider(Qt.Orientation.Horizontal)
-        self._brush_slider.setRange(2, 300)
+        self._brush_slider.setRange(1, 300)
         self._brush_slider.setValue(30)
         self._brush_slider.valueChanged.connect(self._on_slider_brush)
         sl.addWidget(self._brush_slider)

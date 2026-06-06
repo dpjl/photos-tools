@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import pyqtSlot
+from PyQt6.QtWidgets import QMessageBox
 
 from core.batch import save_recipe
 from ui.param_history import (
@@ -113,12 +114,13 @@ class ParamsMixin:
         """Propage un seul paramètre aux images sélectionnées (ou toutes si aucune)."""
         from ui.notifications import Level
         self._save_current_state()
-        run_paths = self._strip.get_run_selection()
-        if run_paths:
-            targets = [c for c in self._session.images if c.file_path in set(run_paths)]
-        else:
-            targets = list(self._session.images)
+        targets = self._propagation_targets()
         if not targets:
+            return
+        if not self._confirm_propagation(
+            "Propager le paramètre",
+            f"Le paramètre « {key} » va être propagé à {len(targets)} photo(s).",
+        ):
             return
         old_vals = {
             cfg.file_path: cfg.step_params.get(step_id, {}).get(key)
@@ -159,12 +161,14 @@ class ParamsMixin:
         """Propage l'état activé/désactivé d'une étape aux images sélectionnées."""
         from ui.notifications import Level
         self._save_current_state()
-        run_paths = self._strip.get_run_selection()
-        if run_paths:
-            targets = [c for c in self._session.images if c.file_path in set(run_paths)]
-        else:
-            targets = list(self._session.images)
+        targets = self._propagation_targets()
         if not targets:
+            return
+        state_str = "activé" if enabled else "désactivé"
+        if not self._confirm_propagation(
+            "Propager l'état de l'étape",
+            f"L'étape « {step_id} » va être {state_str}e sur {len(targets)} photo(s).",
+        ):
             return
         old_vals = {cfg.file_path: cfg.step_enabled.get(step_id) for cfg in targets}
         for cfg in targets:
@@ -189,7 +193,6 @@ class ParamsMixin:
         )
         self._undo_stack.push(cmd)
         n = len(targets)
-        state_str = "activé" if enabled else "désactivé"
         self._statusbar.showMessage(f"Étape « {step_id} » {state_str} sur {n} image(s).")
         if hasattr(self, "_notif"):
             self._notif.notify(
@@ -198,6 +201,28 @@ class ParamsMixin:
                 level=Level.INFO,
                 duration=3500,
             )
+
+    def _propagation_targets(self) -> list:
+        """Retourne la sélection d'exécution, ou tout le batch si elle est vide."""
+        run_paths = self._strip.get_run_selection()
+        if run_paths:
+            run_set = set(run_paths)
+            return [c for c in self._session.images if c.file_path in run_set]
+        return list(self._session.images)
+
+    def _confirm_propagation(self, title: str, message: str) -> bool:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle(title)
+        box.setText(message)
+        box.setInformativeText("Cette action peut être annulée avec Ctrl+Z.")
+        box.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
+        )
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        box.button(QMessageBox.StandardButton.Yes).setText("Propager")
+        box.button(QMessageBox.StandardButton.Cancel).setText("Annuler")
+        return box.exec() == QMessageBox.StandardButton.Yes
 
     # ── Activation/désactivation d'étape ──────────────────────────────────────
 

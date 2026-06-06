@@ -170,7 +170,7 @@ class PreviewMixin:
         self._preview_full_img = None
         self._last_fast_preview = img
         self._preview_stale = False
-        self._preview_view.set_image(img)
+        self._preview_view.set_image(img, preserve_zoom=True)
         self._preview_status_lbl.setText("Preview rapide")
 
     # ── Preview complet ───────────────────────────────────────────────────────
@@ -234,9 +234,12 @@ class PreviewMixin:
             self._redeye_panel._canvas.set_display_image(result_img)
             if self._preview_overlay_step:
                 overlay = self._build_overlay_img(result_img)
-                self._preview_view.set_image(overlay if overlay is not None else result_img)
+                self._preview_view.set_image(
+                    overlay if overlay is not None else result_img,
+                    preserve_zoom=True,
+                )
             else:
-                self._preview_view.set_image(result_img)
+                self._preview_view.set_image(result_img, preserve_zoom=True)
         else:
             self._preview_status_lbl.setText("Preview complet (sans résultat)")
 
@@ -252,9 +255,12 @@ class PreviewMixin:
             return
         if self._preview_overlay_step:
             overlay = self._build_overlay_img(self._preview_full_img)
-            self._preview_view.set_image(overlay if overlay is not None else self._preview_full_img)
+            self._preview_view.set_image(
+                overlay if overlay is not None else self._preview_full_img,
+                preserve_zoom=True,
+            )
         else:
-            self._preview_view.set_image(self._preview_full_img)
+            self._preview_view.set_image(self._preview_full_img, preserve_zoom=True)
 
     def _build_overlay_img(self, base_img: np.ndarray) -> Optional[np.ndarray]:
         """Dessine les annotations de détection sur base_img."""

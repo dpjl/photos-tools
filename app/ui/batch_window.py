@@ -129,6 +129,7 @@ class BatchWindow(
         self._viewed_export_data:  Optional[dict]           = None
         self._preview_stale:       bool                     = True
         self._last_fast_preview:   Optional[np.ndarray]     = None
+        self._has_unretained:      bool                     = False
 
         self._build_ui()
         self._apply_theme()
@@ -209,6 +210,30 @@ class BatchWindow(
         self._retained_count_lbl.setMinimumWidth(138)
         lay.addWidget(self._retained_count_lbl)
         self._refresh_retained_count()
+
+        self._prev_image_btn = QPushButton("‹")
+        self._prev_image_btn.setFixedWidth(30)
+        self._style_btn(self._prev_image_btn)
+        self._prev_image_btn.setToolTip("Photo précédente du batch")
+        self._prev_image_btn.clicked.connect(self._go_to_previous_image)
+        lay.addWidget(self._prev_image_btn)
+
+        self._next_image_btn = QPushButton("›")
+        self._next_image_btn.setFixedWidth(30)
+        self._style_btn(self._next_image_btn)
+        self._next_image_btn.setToolTip("Photo suivante du batch")
+        self._next_image_btn.clicked.connect(self._go_to_next_image)
+        lay.addWidget(self._next_image_btn)
+
+        self._first_unretained_btn = QPushButton("☆")
+        self._first_unretained_btn.setFixedWidth(30)
+        self._style_btn(self._first_unretained_btn)
+        self._first_unretained_btn.setToolTip(
+            "Aller à la première photo sans résultat retenu"
+        )
+        self._first_unretained_btn.clicked.connect(self._go_to_first_unretained)
+        lay.addWidget(self._first_unretained_btn)
+        self._update_batch_nav_buttons()
 
         lay.addStretch()
 
@@ -742,6 +767,7 @@ class BatchWindow(
             "Nombre de photos marquées comme retenues dans le batch"
         )
         complete = total > 0 and retained == total
+        self._has_unretained = total > 0 and not complete
         bg = "#173322" if complete else "#3a2a12"
         fg = "#a8efb3" if complete else "#ffd18a"
         border = "#347a4a" if complete else "#8f6a24"
@@ -750,6 +776,8 @@ class BatchWindow(
             " border-radius:5px; padding:5px 10px; font-size:12px;"
             " font-weight:800;"
         )
+        if hasattr(self, "_first_unretained_btn"):
+            self._first_unretained_btn.setEnabled(self._has_unretained)
 
     def _latest_export_recipe_for_cfg(self, cfg: BatchImageConfig) -> Optional[dict]:
         """Retourne la recette du dernier export de l'image courante."""

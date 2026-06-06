@@ -101,7 +101,7 @@ class SyncedImageView(QGraphicsView):
         if preserve_zoom and self._pix_item is not None:
             fz = self._fit_zoom()
             cz = self._current_zoom()
-            if fz > 0 and abs(cz / fz - 1.0) > 0.05:   # vraiment zoomé
+            if fz > 0:
                 sc = self.mapToScene(self.viewport().rect().center())
                 iw = self._pix_item.pixmap().width()
                 ih = self._pix_item.pixmap().height()

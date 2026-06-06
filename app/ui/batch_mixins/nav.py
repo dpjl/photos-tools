@@ -28,6 +28,51 @@ class NavMixin:
             self._save_current_state()
         self._navigate_to(cfg)
 
+    def _go_to_previous_image(self) -> None:
+        self._go_to_relative_image(-1)
+
+    def _go_to_next_image(self) -> None:
+        self._go_to_relative_image(1)
+
+    def _go_to_relative_image(self, offset: int) -> None:
+        cfg = self._current_cfg
+        if cfg is None:
+            return
+        try:
+            index = self._session.images.index(cfg)
+        except ValueError:
+            return
+        target_index = index + offset
+        if not 0 <= target_index < len(self._session.images):
+            return
+        self._save_current_state()
+        target = self._session.images[target_index]
+        self._navigate_to(target)
+        self._strip.select(target.file_path)
+
+    def _go_to_first_unretained(self) -> None:
+        cfg = self._first_unretained_config()
+        if cfg is None:
+            return
+        if self._current_cfg is not None:
+            self._save_current_state()
+        self._navigate_to(cfg)
+        self._strip.select(cfg.file_path)
+
+    def _first_unretained_config(self) -> Optional[BatchImageConfig]:
+        if not self._session.images:
+            return None
+        selected = {}
+        if self._session.output_dir:
+            mgr = self._session.get_export_manager()
+            sources = [os.path.splitext(cfg.filename) for cfg in self._session.images]
+            selected = mgr.select_thumbnail_exports(sources)
+        for cfg in self._session.images:
+            stem_ext = os.path.splitext(cfg.filename)
+            if not selected.get(stem_ext, (None, False))[1]:
+                return cfg
+        return None
+
     def _navigate_to(self, cfg: BatchImageConfig) -> None:
         """Charge la configuration d'une image dans l'UI."""
         # Réinitialiser le zoom partagé → chaque nouvelle image commence au fit
@@ -86,6 +131,25 @@ class NavMixin:
         # Actualiser les onglets diff si actifs
         self._refresh_if_diff_tab()
         self._update_result_diff_indicator()
+        self._update_batch_nav_buttons()
+
+    def _update_batch_nav_buttons(self) -> None:
+        if not hasattr(self, "_prev_image_btn"):
+            return
+        cfg = self._current_cfg
+        count = len(self._session.images)
+        index = -1
+        if cfg is not None:
+            try:
+                index = self._session.images.index(cfg)
+            except ValueError:
+                index = -1
+        self._prev_image_btn.setEnabled(index > 0)
+        self._next_image_btn.setEnabled(0 <= index < count - 1)
+        if hasattr(self, "_first_unretained_btn"):
+            self._first_unretained_btn.setEnabled(
+                bool(getattr(self, "_has_unretained", False))
+            )
 
     # ── Sauvegarde de l'état ──────────────────────────────────────────────────
 
