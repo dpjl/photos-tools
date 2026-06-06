@@ -26,6 +26,7 @@ APP_DIR  = os.path.dirname(os.path.abspath(__file__))
 BASE_DIR = os.path.dirname(APP_DIR)
 
 MODELS_DIR       = os.path.join(BASE_DIR, "models")
+REALESRGAN_DIR   = os.path.join(MODELS_DIR, "realesrgan")
 GFPGAN_WEIGHTS   = os.path.join(APP_DIR, "gfpgan", "weights")
 LAMA_CACHE_DIR   = os.path.join(os.path.expanduser("~"), ".cache", "torch", "hub", "checkpoints")
 
@@ -65,6 +66,17 @@ MODELS = [
         os.path.join(MODELS_DIR, "scunet_color_real_psnr.pth"),
         "https://github.com/cszn/KAIR/releases/download/v1.0/scunet_color_real_psnr.pth",
         69,
+    ),
+    # ── Real-ESRGAN upscale ─────────────────────────────────────────────────
+    (
+        os.path.join(REALESRGAN_DIR, "RealESRGAN_x2plus.pth"),
+        "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth",
+        64,
+    ),
+    (
+        os.path.join(REALESRGAN_DIR, "RealESRGAN_x4plus.pth"),
+        "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
+        64,
     ),
     # ── MediaPipe face landmarker ─────────────────────────────────────────────
     (
@@ -183,6 +195,7 @@ def check_models() -> list[tuple[str, bool, str]]:
 def download_all(skip_existing: bool = True) -> None:
     """Télécharge tous les modèles manquants."""
     os.makedirs(MODELS_DIR, exist_ok=True)
+    os.makedirs(REALESRGAN_DIR, exist_ok=True)
     os.makedirs(GFPGAN_WEIGHTS, exist_ok=True)
     os.makedirs(LAMA_CACHE_DIR, exist_ok=True)
 

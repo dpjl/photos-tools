@@ -25,6 +25,7 @@ class ControlPanel(QWidget):
     rerun_requested             = pyqtSignal(str)
     overlay_toggled             = pyqtSignal(str, bool)
     mask_edit_requested         = pyqtSignal(str)
+    crop_edit_requested         = pyqtSignal(str)
     color_picker_requested      = pyqtSignal(str)
 
     def __init__(self, parent=None):
@@ -95,6 +96,7 @@ class ControlPanel(QWidget):
         self.step_list.rerun_requested.connect(self.rerun_requested)
         self.step_list.overlay_toggled.connect(self.overlay_toggled)
         self.step_list.mask_edit_requested.connect(self.mask_edit_requested)
+        self.step_list.crop_edit_requested.connect(self.crop_edit_requested)
         self.step_list.color_picker_requested.connect(self.color_picker_requested)
 
         scroll.setWidget(self.step_list)

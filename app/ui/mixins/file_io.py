@@ -106,6 +106,7 @@ class FileIOMixin:
             "step_order":      self._ctrl.step_list.get_order(),
             "step_enabled":    self._ctrl.step_list.get_enabled(),
             "step_params":     self._ctrl.step_list.get_all_params(),
+            "crop_rect":       self._export_crop_rect(),
         }
 
         mgr = ExportManager(self._output_dir)
@@ -121,6 +122,13 @@ class FileIOMixin:
             # Basculer vers l'onglet Exports
             if hasattr(self, "_bottom_tabs"):
                 self._bottom_tabs.setCurrentIndex(1)
+
+    def _export_crop_rect(self):
+        crop_step = self._steps_by_id.get("crop")
+        if crop_step is None or not hasattr(crop_step, "get_crop_rect"):
+            return None
+        rect = crop_step.get_crop_rect()
+        return list(rect) if rect else None
 
     def _on_save_thumb(self, step_id: str):
         """Enregistre l'image correspondant à la vignette choisie."""

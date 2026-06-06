@@ -35,6 +35,7 @@ class ExportsMixin:
             "step_order":     self._step_list.get_order(),
             "step_enabled":   self._step_list.get_enabled(),
             "step_params":    self._step_list.get_all_params(),
+            "crop_rect":      list(cfg.crop_rect) if cfg.crop_rect else None,
             "wb_pick":        list(pick) if pick else None,
             "wb_patch_radius": self._wb_panel.get_patch_radius(),
             "has_mask":       has_mask,

@@ -12,10 +12,12 @@ from PyQt6.QtCore import pyqtSlot, QTimer
 from ui.batch_window_constants import (
     _FAST_PREVIEW_IDS, _PREVIEW_TABS,
     _TAB_MASK, _TAB_WB, _TAB_REDEYE,
+    _TAB_CROP,
     _TAB_PREVIEW, _TAB_RESULT,
     _TAB_ORIGIN,
 )
 from core.pipeline import PipelineWorker
+from core.image_info import format_preview_info
 
 
 class PreviewMixin:
@@ -37,6 +39,14 @@ class PreviewMixin:
             self._mark_customized()
         self._schedule_preview_update()
 
+    @pyqtSlot(object)
+    def _on_crop_changed(self, rect) -> None:
+        if self._current_cfg is not None:
+            self._current_cfg.crop_rect = rect
+            self._mark_customized()
+            self._inject_instance_state(self._current_cfg)
+        self._schedule_preview_update()
+
     # ── Onglets ───────────────────────────────────────────────────────────────
 
     @pyqtSlot(int)
@@ -52,7 +62,7 @@ class PreviewMixin:
         self._prev_tab_index = index
 
         # 2. Sync éditeurs → cfg en mémoire quand on quitte un onglet éditeur
-        if prev in (_TAB_MASK, _TAB_WB, _TAB_REDEYE):
+        if prev in (_TAB_MASK, _TAB_WB, _TAB_REDEYE, _TAB_CROP):
             self._sync_editor_state()
 
         # 3. Charger le résultat si besoin
@@ -84,6 +94,8 @@ class PreviewMixin:
             return self._wb_panel._canvas
         if index == _TAB_REDEYE:
             return self._redeye_panel._canvas
+        if index == _TAB_CROP:
+            return self._crop_panel._canvas
         if index == _TAB_ORIGIN:
             return self._origin_view
         if index == _TAB_RESULT:
@@ -98,6 +110,32 @@ class PreviewMixin:
             return
         self._preview_stale = True
         self._preview_timer.start()
+
+    def _update_preview_info(self, preview_img: Optional[np.ndarray] = None) -> None:
+        if not hasattr(self, "_preview_info_lbl"):
+            return
+        cfg = self._current_cfg
+        if cfg is None:
+            self._preview_info_lbl.setText("")
+            return
+        original_dims = None
+        if self._current_orig is not None:
+            h, w = self._current_orig.shape[:2]
+            original_dims = (w, h)
+        if preview_img is None:
+            if self._preview_full_img is not None:
+                preview_img = self._preview_full_img
+            elif self._last_fast_preview is not None:
+                preview_img = self._last_fast_preview
+            else:
+                preview_img = self._current_orig
+        preview_dims = None
+        if preview_img is not None:
+            ph, pw = preview_img.shape[:2]
+            preview_dims = (pw, ph)
+        self._preview_info_lbl.setText(
+            format_preview_info(cfg.file_path, original_dims, preview_dims)
+        )
 
     def _do_preview_update(self) -> None:
         """Calcule le fast-pipeline si l'onglet actif est éligible et que l'aperçu est périmé."""
@@ -172,6 +210,7 @@ class PreviewMixin:
         self._preview_stale = False
         self._preview_view.set_image(img, preserve_zoom=True)
         self._preview_status_lbl.setText("Preview rapide")
+        self._update_preview_info(img)
 
     # ── Preview complet ───────────────────────────────────────────────────────
 
@@ -240,8 +279,10 @@ class PreviewMixin:
                 )
             else:
                 self._preview_view.set_image(result_img, preserve_zoom=True)
+            self._update_preview_info(result_img)
         else:
             self._preview_status_lbl.setText("Preview complet (sans résultat)")
+            self._update_preview_info()
 
     # ── Overlay de détection ──────────────────────────────────────────────────
 

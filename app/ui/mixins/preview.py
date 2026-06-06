@@ -9,7 +9,7 @@ import numpy as np
 
 # Étapes dont un changement de paramètre déclenche le mini-pipeline de preview rapide
 _FAST_PREVIEW_IDS = frozenset({"color", "facehighlight", "ddcolor_lut", "autocolor", "wb",
-                               "lightleak", "rembg"})
+                               "lightleak", "rembg", "crop"})
 
 
 class PreviewMixin:

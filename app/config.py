@@ -13,6 +13,9 @@ BASE_DIR = os.path.dirname(APP_DIR)
 GFPGAN_MODEL_PATH        = os.path.join(BASE_DIR, "GFPGANv1.4.pth")
 SCUNET_MODELS_DIR        = os.path.join(BASE_DIR, "models")
 MEDIAPIPE_LANDMARKER_PATH = os.path.join(APP_DIR,  "face_landmarker.task")
+REALESRGAN_MODELS_DIR    = os.path.join(SCUNET_MODELS_DIR, "realesrgan")
+REALESRGAN_X2PLUS_PATH   = os.path.join(REALESRGAN_MODELS_DIR, "RealESRGAN_x2plus.pth")
+REALESRGAN_X4PLUS_PATH   = os.path.join(REALESRGAN_MODELS_DIR, "RealESRGAN_x4plus.pth")
 
 # DDColor modelscope (couleur IA)
 DDCOLOR_MODEL_REPO = "piddnad/ddcolor_modelscope"

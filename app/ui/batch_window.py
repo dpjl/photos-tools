@@ -43,6 +43,7 @@ from steps import ALL_STEPS
 from ui.step_panel import StepListWidget
 from ui.batch_thumbnail_strip import BatchThumbnailStrip
 from ui.mask_editor import MaskCanvasPanel
+from ui.crop_editor import CropCanvasPanel
 from ui.wb_picker import WBPickerPanel
 from ui.image_view import SyncedImageView
 from ui.export_mosaic import ExportMosaicView
@@ -51,7 +52,7 @@ from ui.notifications import NotificationManager, Level
 from ui.batch_window_constants import (
     _FAST_PREVIEW_IDS, _PREVIEW_TABS,
     _TAB_PREVIEW, _TAB_MASK, _TAB_WB, _TAB_REDEYE,
-    _TAB_ORIGIN, _TAB_RESULT,
+    _TAB_CROP, _TAB_ORIGIN, _TAB_RESULT,
 )
 from core.export_manager import ExportManager, ExportEntry
 from core.image_metadata import write_jpeg_with_source_exif
@@ -362,6 +363,7 @@ class BatchWindow(
         self._step_list.enabled_propagate_requested.connect(self._on_enabled_propagate)
         self._step_list.order_reordered.connect(self._on_order_reordered)
         self._step_list.mask_edit_requested.connect(self._on_mask_edit_requested)
+        self._step_list.crop_edit_requested.connect(self._on_crop_edit_requested)
         self._step_list.color_picker_requested.connect(self._on_color_picker_requested)
         self._step_list.overlay_toggled.connect(self._on_overlay_toggled)
         scroll.setWidget(self._step_list)
@@ -399,6 +401,8 @@ class BatchWindow(
         )
         self._redeye_panel = MaskCanvasPanel(_dummy, None, show_ok_cancel=False,
                                               sidebar_width=_SIDEBAR_W)
+        self._crop_panel = CropCanvasPanel(_dummy, None, show_ok_cancel=False,
+                                           sidebar_width=_SIDEBAR_W)
 
         self._origin_view = SyncedImageView()
 
@@ -419,6 +423,18 @@ class BatchWindow(
             " border-radius:3px; padding:4px; background:#111124;"
         )
         ps_lay.addWidget(self._preview_status_lbl)
+
+        self._preview_info_lbl = QLabel("")
+        self._preview_info_lbl.setWordWrap(True)
+        self._preview_info_lbl.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self._preview_info_lbl.setStyleSheet(
+            "color:#92a9b8; font-size:10px; font-family:Consolas,monospace;"
+            " border:1px solid #242446; border-radius:4px; padding:6px;"
+            " background:#111124;"
+        )
+        ps_lay.addWidget(self._preview_info_lbl)
 
         self._full_preview_btn = QPushButton("⚡ Preview complet")
         self._full_preview_btn.setToolTip(
@@ -446,6 +462,7 @@ class BatchWindow(
         self._tabs.addTab(self._mask_panel,                               "Masque")        # _TAB_MASK
         self._tabs.addTab(self._wb_panel,                                 "Blanc")         # _TAB_WB
         self._tabs.addTab(self._redeye_panel,                             "Yeux rouges")   # _TAB_REDEYE
+        self._tabs.addTab(self._crop_panel,                               "Recadrage")     # _TAB_CROP
         self._tabs.addTab(self._wrap_with_sidebar(self._origin_view, _SIDEBAR_W), "Originale")  # _TAB_ORIGIN
 
         # ── Onglet Résultat : mosaïque d'exports ──
@@ -471,6 +488,7 @@ class BatchWindow(
 
         self._wb_panel._canvas.pick_changed.connect(self._on_wb_pick_changed)
         self._wb_panel._rad_slider.valueChanged.connect(self._on_wb_radius_changed)
+        self._crop_panel.crop_changed.connect(self._on_crop_changed)
         splitter.addWidget(right)
 
         splitter.setStretchFactor(0, 0)
@@ -635,6 +653,8 @@ class BatchWindow(
         if cfg.wb_patch_radius:
             self._wb_panel._rad_slider.setValue(cfg.wb_patch_radius)
             self._wb_panel._rad_val_lbl.setText(f"{cfg.wb_patch_radius} px")
+        if self._current_orig is not None:
+            self._crop_panel.set_image(self._current_orig, cfg.crop_rect)
         self._update_result_diff_indicator()
         self._statusbar.showMessage("Configuration restaurée depuis l'export.")
         self._schedule_preview_update()

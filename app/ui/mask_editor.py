@@ -53,6 +53,7 @@ class MaskCanvas(QWidget):
         self._orig_img_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
         ih, iw = self._orig_img_rgb.shape[:2]
         self._img_w, self._img_h = iw, ih
+        self._display_w, self._display_h = iw, ih
 
         # Pixmap base (image seule, creee une fois puis eventuellement remplacee)
         self._base_pixmap: QPixmap = self._make_rgb_pixmap(self._orig_img_rgb)
@@ -99,6 +100,7 @@ class MaskCanvas(QWidget):
         self._orig_img_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
         ih, iw = self._orig_img_rgb.shape[:2]
         self._img_w, self._img_h = iw, ih
+        self._display_w, self._display_h = iw, ih
         self._base_pixmap = self._make_rgb_pixmap(self._orig_img_rgb)
         if initial_mask is not None and initial_mask.shape[:2] == (ih, iw):
             self._mask = initial_mask.copy()
@@ -121,6 +123,8 @@ class MaskCanvas(QWidget):
     def set_display_image(self, bgr: np.ndarray) -> None:
         """Change l'image affichee. Le masque n'est pas affecte."""
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        dh, dw = rgb.shape[:2]
+        self._display_w, self._display_h = dw, dh
         self._base_pixmap = self._make_rgb_pixmap(rgb)
         self._dirty = True
         self.update()
@@ -151,11 +155,11 @@ class MaskCanvas(QWidget):
     def get_zoom_state(self) -> tuple:
         """Retourne (zoom_ratio, cx_rel, cy_rel) normalisés — interface commune."""
         cw, ch = self.width(), self.height()
-        if cw == 0 or ch == 0 or self._img_w == 0 or self._img_h == 0:
+        if cw == 0 or ch == 0 or self._display_w == 0 or self._display_h == 0:
             return (1.0, 0.5, 0.5)
-        fit  = min(cw / self._img_w, ch / self._img_h)
-        dw   = self._img_w * fit * self._zoom
-        dh   = self._img_h * fit * self._zoom
+        fit  = min(cw / self._display_w, ch / self._display_h)
+        dw   = self._display_w * fit * self._zoom
+        dh   = self._display_h * fit * self._zoom
         cx_rel = 0.5 - self._pan_x / dw if dw else 0.5
         cy_rel = 0.5 - self._pan_y / dh if dh else 0.5
         return (self._zoom, cx_rel, cy_rel)
@@ -164,11 +168,11 @@ class MaskCanvas(QWidget):
         """Applique un état de vue normalisé (reçu de l'onglet précédent)."""
         self._zoom = max(0.5, min(16.0, zoom_ratio))
         cw, ch = self.width(), self.height()
-        if cw == 0 or ch == 0 or self._img_w == 0 or self._img_h == 0:
+        if cw == 0 or ch == 0 or self._display_w == 0 or self._display_h == 0:
             return
-        fit  = min(cw / self._img_w, ch / self._img_h)
-        dw   = self._img_w * fit * self._zoom
-        dh   = self._img_h * fit * self._zoom
+        fit  = min(cw / self._display_w, ch / self._display_h)
+        dw   = self._display_w * fit * self._zoom
+        dh   = self._display_h * fit * self._zoom
         self._pan_x = (0.5 - cx_rel) * dw
         self._pan_y = (0.5 - cy_rel) * dh
         self.update()
@@ -186,10 +190,10 @@ class MaskCanvas(QWidget):
         cw, ch = self.width(), self.height()
         if cw == 0 or ch == 0:
             return QRect(0, 0, 0, 0)
-        fit_scale = min(cw / self._img_w, ch / self._img_h)
+        fit_scale = min(cw / self._display_w, ch / self._display_h)
         scale     = fit_scale * self._zoom
-        dw        = int(self._img_w * scale)
-        dh        = int(self._img_h * scale)
+        dw        = int(self._display_w * scale)
+        dh        = int(self._display_h * scale)
         base_x    = (cw - dw) // 2
         base_y    = (ch - dh) // 2
         return QRect(base_x + int(self._pan_x), base_y + int(self._pan_y), dw, dh)
@@ -203,9 +207,9 @@ class MaskCanvas(QWidget):
         fy = (canvas_pt.y() - r.y()) / r.height()
         self._zoom = max(0.5, min(16.0, self._zoom * factor))
         cw, ch     = self.width(), self.height()
-        fit_scale  = min(cw / self._img_w, ch / self._img_h) if cw and ch else 1.0
+        fit_scale  = min(cw / self._display_w, ch / self._display_h) if cw and ch else 1.0
         new_scale  = fit_scale * self._zoom
-        dw, dh     = int(self._img_w * new_scale), int(self._img_h * new_scale)
+        dw, dh     = int(self._display_w * new_scale), int(self._display_h * new_scale)
         self._pan_x = canvas_pt.x() - fx * dw - (cw - dw) // 2
         self._pan_y = canvas_pt.y() - fy * dh - (ch - dh) // 2
         self.update()
@@ -215,8 +219,10 @@ class MaskCanvas(QWidget):
         r = self._display_rect()
         if r.width() == 0 or r.height() == 0:
             return None
-        ix = int((pt.x() - r.x()) * self._img_w / r.width())
-        iy = int((pt.y() - r.y()) * self._img_h / r.height())
+        dx = (pt.x() - r.x()) * self._display_w / r.width()
+        dy = (pt.y() - r.y()) * self._display_h / r.height()
+        ix = int(dx * self._img_w / max(1, self._display_w))
+        iy = int(dy * self._img_h / max(1, self._display_h))
         ix = int(np.clip(ix, 0, self._img_w - 1))
         iy = int(np.clip(iy, 0, self._img_h - 1))
         return ix, iy
@@ -371,11 +377,18 @@ class MaskCanvas(QWidget):
     def _get_composite(self) -> QPixmap:
         """Retourne le pixmap composite (image + overlay), recalcule si necessaire."""
         if self._dirty or self._composite_cache is None:
-            iw, ih = self._img_w, self._img_h
+            iw, ih = self._display_w, self._display_h
             px = QPixmap(iw, ih)
             p  = QPainter(px)
             p.drawPixmap(0, 0, self._base_pixmap)
-            p.drawPixmap(0, 0, self._make_overlay_pixmap())
+            overlay = self._make_overlay_pixmap()
+            if overlay.width() != iw or overlay.height() != ih:
+                overlay = overlay.scaled(
+                    iw, ih,
+                    Qt.AspectRatioMode.IgnoreAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            p.drawPixmap(0, 0, overlay)
             p.end()
             self._composite_cache = px
             self._dirty           = False

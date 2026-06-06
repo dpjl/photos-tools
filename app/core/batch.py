@@ -45,6 +45,7 @@ class BatchImageConfig:
     # État des étapes avec état instance (inpaint / WB / redeye)
     inpaint_mask:    Optional[np.ndarray] = field(default=None, repr=False)
     redeye_mask:     Optional[np.ndarray] = field(default=None, repr=False)
+    crop_rect:       Optional[tuple[float, float, float, float]] = None
     wb_pick:         Optional[tuple[int, int]] = None
     wb_patch_radius: int = 5
 
@@ -71,6 +72,7 @@ class BatchImageConfig:
             step_params     = {k: dict(v) for k, v in self.step_params.items()},
             inpaint_mask    = self.inpaint_mask.copy() if self.inpaint_mask is not None else None,
             redeye_mask     = self.redeye_mask.copy() if self.redeye_mask is not None else None,
+            crop_rect       = self.crop_rect,
             wb_pick         = self.wb_pick,
             wb_patch_radius = self.wb_patch_radius,
             customized      = self.customized,
@@ -175,6 +177,7 @@ class BatchSession:
         config.step_params     = {k: dict(v) for k, v in d.step_params.items()}
         config.inpaint_mask    = None
         config.redeye_mask     = None
+        config.crop_rect       = None
         config.wb_pick         = None
         config.wb_patch_radius = d.wb_patch_radius
         config.customized      = False
@@ -233,6 +236,7 @@ def build_recipe_dict(config: "BatchImageConfig") -> dict:
         "step_order":      config.step_order,
         "step_enabled":    config.step_enabled,
         "step_params":     config.step_params,
+        "crop_rect":       list(config.crop_rect) if config.crop_rect else None,
         "wb_pick":         list(config.wb_pick) if config.wb_pick else None,
         "wb_patch_radius":  config.wb_patch_radius,
     }
@@ -383,6 +387,7 @@ def save_export_recipe(config: "BatchImageConfig") -> Optional[str]:
             "step_order":     config.step_order,
             "step_enabled":   config.step_enabled,
             "step_params":    config.step_params,
+            "crop_rect":      list(config.crop_rect) if config.crop_rect else None,
             "wb_pick":        list(config.wb_pick) if config.wb_pick else None,
             "wb_patch_radius": config.wb_patch_radius,
             "has_mask":       _mask_has_pixels(config.inpaint_mask),
@@ -422,6 +427,12 @@ def _apply_recipe(config: "BatchImageConfig", recipe: dict) -> None:
         # nouveaux steps.
         for k, v in recipe["step_params"].items():
             config.step_params[k] = dict(v)
+    if "crop_rect" in recipe:
+        rect = recipe.get("crop_rect")
+        config.crop_rect = (
+            tuple(float(v) for v in rect)
+            if rect is not None else None
+        )
     if recipe.get("wb_pick") is not None:
         config.wb_pick = tuple(recipe["wb_pick"])
     if "wb_patch_radius" in recipe:

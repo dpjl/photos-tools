@@ -37,6 +37,28 @@ class EditorsMixin:
             self._status_bar.showMessage(f"Masque mis à jour pour « {step.name} ».")
 
     @pyqtSlot(str)
+    def _on_crop_edit_requested(self, step_id: str):
+        """Ouvre l'éditeur de recadrage pour l'étape step_id."""
+        from PyQt6.QtWidgets import QDialog
+        from ui.crop_editor import CropEditorDialog
+
+        step = self._steps_by_id.get(step_id)
+        if step is None or not hasattr(step, "set_crop_rect"):
+            return
+        img = self._get_step_input_image(step_id)
+        if img is None:
+            self._status_bar.showMessage("Ouvrez une image avant de recadrer.")
+            return
+        dlg = CropEditorDialog(self, img, step.get_crop_rect())
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            step.set_crop_rect(dlg.get_crop_rect())
+            self._status_bar.showMessage(f"Recadrage mis à jour pour « {step.name} ».")
+            self._mark_stale_from(step_id)
+            self._update_result_diff_indicator()
+            if hasattr(self, "_schedule_preview"):
+                self._schedule_preview(step_id)
+
+    @pyqtSlot(str)
     def _on_color_picker_requested(self, step_id: str):
         """Ouvre la pipette de balance des blancs pour l'étape step_id."""
         from PyQt6.QtWidgets import QDialog

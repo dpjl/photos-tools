@@ -134,6 +134,7 @@ class MainApp(
         self._ctrl.rerun_requested.connect(self._run_from)
         self._ctrl.overlay_toggled.connect(self._on_overlay_toggled)
         self._ctrl.mask_edit_requested.connect(self._on_mask_edit_requested)
+        self._ctrl.crop_edit_requested.connect(self._on_crop_edit_requested)
         self._ctrl.color_picker_requested.connect(self._on_color_picker_requested)
         splitter.addWidget(self._ctrl)
 
@@ -319,6 +320,10 @@ class MainApp(
                 panel = self._ctrl.step_list.get_panel(sid)
                 if panel:
                     panel.set_params(params)
+        if "crop_rect" in recipe:
+            crop_step = self._steps_by_id.get("crop")
+            if crop_step is not None and hasattr(crop_step, "set_crop_rect"):
+                crop_step.set_crop_rect(recipe.get("crop_rect"))
         self._params_snapshot = self._ctrl.step_list.get_all_params()
         self._update_result_diff_indicator()
         self._status_bar.showMessage("Configuration restaurée depuis l'export.")

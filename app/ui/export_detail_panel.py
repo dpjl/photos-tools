@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal
 
 from core.export_manager import ExportManager, ExportEntry
+from core.image_info import format_dimensions, image_dimensions
 from ui.param_compare import ParamCompareWidget
 
 
@@ -156,7 +157,11 @@ class ExportDetailPanel(QWidget):
                 date_str = dt.strftime("%d/%m/%Y à %H:%M:%S")
             except Exception:
                 date_str = entry.exported_at
-        self._date_label.setText(date_str)
+        dims = image_dimensions(entry.image_path)
+        details = [date_str] if date_str else []
+        if dims:
+            details.append(format_dimensions(dims))
+        self._date_label.setText("  •  ".join(details))
 
         self._update_best_btn()
         self._rebuild_nav()

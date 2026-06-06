@@ -11,7 +11,7 @@ from ui.param_history import (
     PropagateEnabledCommand, MoveStepCommand, ToggleStepCommand,
 )
 from ui.batch_window_constants import (
-    _FAST_PREVIEW_IDS, _TAB_MASK, _TAB_WB, _TAB_REDEYE,
+    _FAST_PREVIEW_IDS, _TAB_MASK, _TAB_WB, _TAB_REDEYE, _TAB_CROP,
 )
 
 
@@ -295,6 +295,10 @@ class ParamsMixin:
     @pyqtSlot(str)
     def _on_mask_edit_requested(self, step_id: str) -> None:
         self._tabs.setCurrentIndex(_TAB_MASK)
+
+    @pyqtSlot(str)
+    def _on_crop_edit_requested(self, step_id: str) -> None:
+        self._tabs.setCurrentIndex(_TAB_CROP)
 
     @pyqtSlot(str)
     def _on_color_picker_requested(self, step_id: str) -> None:

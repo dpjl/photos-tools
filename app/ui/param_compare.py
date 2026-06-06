@@ -1,35 +1,109 @@
-"""ui/param_compare.py — Comparaison compacte des paramètres entre exports.
-
-Widget affichant les différences de paramètres entre l'export sélectionné
-et les autres exports disponibles, dans un format compact adapté au panneau latéral.
-"""
+"""ui/param_compare.py — Paramètres d'export avec sections pliables."""
 
 from __future__ import annotations
 
 from typing import Optional
 
-from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFrame, QSizePolicy,
-)
 from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import (
+    QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy,
+    QVBoxLayout, QWidget,
+)
 
 from core.export_manager import ExportEntry
 from steps import ALL_STEPS
 
-# Lookup step name depuis ALL_STEPS
-_STEP_NAMES: dict[str, str] = {}
-try:
-    _STEP_NAMES = {s.id: s.name for s in ALL_STEPS}
-except Exception:
-    pass
+
+_STEP_NAMES = {s.id: s.name for s in ALL_STEPS}
+_STEP_SHORT_NAMES = {s.id: s.short_name for s in ALL_STEPS}
+
+
+class _FoldSection(QFrame):
+    """Petite section pliable, compacte par défaut."""
+
+    def __init__(
+        self,
+        title: str,
+        summary: str,
+        accent: str,
+        expanded: bool = False,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._expanded = expanded
+        self.setStyleSheet(
+            "QFrame { background:#1e1e32; border-radius:4px;"
+            f" border-left:3px solid {accent}; }}"
+        )
+        root = QVBoxLayout(self)
+        root.setContentsMargins(7, 4, 5, 5)
+        root.setSpacing(3)
+
+        self._header_btn = QPushButton()
+        self._header_btn.setCheckable(True)
+        self._header_btn.setChecked(expanded)
+        self._header_btn.clicked.connect(self._toggle)
+        self._header_btn.setStyleSheet(
+            "QPushButton { background:transparent; border:none; color:#dde;"
+            " text-align:left; padding:0; font-size:10px; font-weight:700; }"
+            "QPushButton:hover { color:#fff; }"
+        )
+        root.addWidget(self._header_btn)
+
+        self._summary_lbl = QLabel(summary)
+        self._summary_lbl.setWordWrap(True)
+        self._summary_lbl.setStyleSheet(
+            "color:#8792a8; font-size:9px; background:transparent;"
+        )
+        root.addWidget(self._summary_lbl)
+
+        self._body = QWidget()
+        self._body_lay = QVBoxLayout(self._body)
+        self._body_lay.setContentsMargins(0, 2, 0, 0)
+        self._body_lay.setSpacing(2)
+        root.addWidget(self._body)
+        self._title = title
+        self._sync()
+
+    def add_row(self, label: str, value: str, changed: bool = False) -> None:
+        row = QLabel(
+            f'<span style="color:#778">{label}</span> '
+            f'<span style="color:{"#f0a13a" if changed else "#aab"}">{value}</span>'
+        )
+        row.setWordWrap(True)
+        row.setStyleSheet("font-size:10px; background:transparent;")
+        self._body_lay.addWidget(row)
+
+    def add_diff(self, export_index: int, value: str) -> None:
+        row = QLabel(
+            f'<span style="color:#556">#{export_index:03d}</span> '
+            f'<span style="color:#8d8a64">{value}</span>'
+        )
+        row.setWordWrap(True)
+        row.setStyleSheet("font-size:9px; background:transparent; margin-left:8px;")
+        self._body_lay.addWidget(row)
+
+    def add_note(self, text: str) -> None:
+        row = QLabel(text)
+        row.setWordWrap(True)
+        row.setStyleSheet("font-size:9px; color:#778; background:transparent;")
+        self._body_lay.addWidget(row)
+
+    def _toggle(self) -> None:
+        self._expanded = self._header_btn.isChecked()
+        self._sync()
+
+    def _sync(self) -> None:
+        self._header_btn.setText(("▾ " if self._expanded else "▸ ") + self._title)
+        self._body.setVisible(self._expanded)
 
 
 class ParamCompareWidget(QWidget):
-    """Vue compacte de comparaison des paramètres entre exports.
+    """Vue concise des paramètres entre exports.
 
-    Par défaut : affiche uniquement les paramètres qui diffèrent.
-    Bouton toggle : afficher tous les paramètres.
+    Les étapes sont repliées par défaut : le résumé indique activation, nombre de
+    paramètres et différences. Le détail garde les mêmes informations que l'ancien
+    affichage, accessible au besoin.
     """
 
     def __init__(self, parent=None):
@@ -40,25 +114,23 @@ class ParamCompareWidget(QWidget):
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(4)
+        lay.setSpacing(5)
 
-        # Bouton toggle
-        self._toggle_btn = QPushButton("Afficher tous les paramètres")
+        self._toggle_btn = QPushButton("Afficher toutes les étapes")
         self._toggle_btn.setCheckable(True)
         self._toggle_btn.setStyleSheet(
-            "QPushButton { background: transparent; color: #68a; border: none;"
-            "  font-size: 10px; text-align: left; padding: 2px 0; }"
-            "QPushButton:hover { color: #8ac; }"
-            "QPushButton:checked { color: #acd; }"
+            "QPushButton { background:#15152a; color:#86a4be; border:1px solid #2a2a4a;"
+            " border-radius:4px; font-size:10px; text-align:left; padding:5px 7px; }"
+            "QPushButton:hover { color:#b9d7ee; border-color:#3a4e6c; }"
+            "QPushButton:checked { color:#d4e7f7; }"
         )
         self._toggle_btn.clicked.connect(self._on_toggle)
         lay.addWidget(self._toggle_btn)
 
-        # Conteneur des étapes
         self._steps_container = QWidget()
         self._steps_layout = QVBoxLayout(self._steps_container)
         self._steps_layout.setContentsMargins(0, 0, 0, 0)
-        self._steps_layout.setSpacing(2)
+        self._steps_layout.setSpacing(5)
         lay.addWidget(self._steps_container)
         lay.addStretch()
 
@@ -67,7 +139,6 @@ class ParamCompareWidget(QWidget):
         entry: Optional[ExportEntry],
         all_entries: list[ExportEntry],
     ):
-        """Met à jour la comparaison."""
         self._entry = entry
         self._all_entries = all_entries
         self._rebuild()
@@ -75,13 +146,12 @@ class ParamCompareWidget(QWidget):
     def _on_toggle(self):
         self._show_all = self._toggle_btn.isChecked()
         self._toggle_btn.setText(
-            "Masquer les paramètres communs" if self._show_all
-            else "Afficher tous les paramètres"
+            "Masquer les étapes sans différence"
+            if self._show_all else "Afficher toutes les étapes"
         )
         self._rebuild()
 
     def _rebuild(self):
-        # Vider
         while self._steps_layout.count():
             item = self._steps_layout.takeAt(0)
             if item.widget():
@@ -91,189 +161,136 @@ class ParamCompareWidget(QWidget):
             return
 
         recipe = self._entry.recipe_data
-        step_order = recipe.get("step_order", [])
+        step_order = list(recipe.get("step_order", []))
         step_enabled = recipe.get("step_enabled", {})
         step_params = recipe.get("step_params", {})
 
-        # Collecter les recipes de TOUS les exports (y compris le courant)
-        all_recipes = []
-        for e in self._all_entries:
-            if e.recipe_data:
-                all_recipes.append((e.index, e.recipe_data))
+        all_recipes = [
+            (e.index, e.recipe_data)
+            for e in self._all_entries
+            if e.recipe_data
+        ]
+        other_recipes = [
+            (i, r)
+            for i, r in all_recipes
+            if i != self._entry.index
+        ]
 
-        # Recipes des AUTRES exports (pour les diffs)
-        other_recipes = [(i, r) for i, r in all_recipes if i != self._entry.index]
-
-        # Pré-calculer : l'étape est-elle active dans au moins un export ?
-        step_active_anywhere: dict[str, bool] = {}
-        for sid in step_order:
-            active = False
-            for _, r in all_recipes:
-                if r.get("step_enabled", {}).get(sid, False):
-                    active = True
-                    break
-            step_active_anywhere[sid] = active
-
-        # ── Paramètres globaux (wb_pick, wb_patch_radius) ────────────────
         self._build_global_params(recipe, other_recipes)
 
         for sid in step_order:
             enabled = step_enabled.get(sid, True)
             params = step_params.get(sid, {})
-
-            # Calculer les diffs pour cette étape
-            enabled_diffs = []
-            param_diffs: dict[str, list[tuple[int, object]]] = {}
-
-            for o_idx, o_recipe in other_recipes:
-                o_enabled = o_recipe.get("step_enabled", {}).get(sid)
-                if o_enabled is not None and o_enabled != enabled:
-                    enabled_diffs.append((o_idx, o_enabled))
-
-                o_params = o_recipe.get("step_params", {}).get(sid, {})
-                all_keys = set(params.keys()) | set(o_params.keys())
-                for key in all_keys:
-                    v = params.get(key)
-                    o_v = o_params.get(key)
-                    if v != o_v:
-                        if key not in param_diffs:
-                            param_diffs[key] = []
-                        param_diffs[key].append((o_idx, o_v))
-
-            has_any_diff = bool(enabled_diffs or param_diffs)
-            is_active = step_active_anywhere.get(sid, False)
-
-            # En mode "diffs only" : masquer les étapes sans diff ET
-            # masquer les étapes inactives partout (même avec des diffs de params)
-            if not self._show_all:
-                if not is_active or not has_any_diff:
-                    continue
-
-            # ── Widget étape ──
-            step_widget = QFrame()
-            step_widget.setStyleSheet(
-                "QFrame { background: #1e1e32; border-radius: 3px;"
-                "  border-left: 3px solid %s; padding: 4px; margin: 1px 0; }"
-                % ("#3a8fd4" if has_any_diff else "#2a2a4a")
+            enabled_diffs, param_diffs = _diffs_for_step(
+                sid, enabled, params, other_recipes
             )
-            slayout = QVBoxLayout(step_widget)
-            slayout.setContentsMargins(8, 4, 4, 4)
-            slayout.setSpacing(2)
+            has_diff = bool(enabled_diffs or param_diffs)
+            active_anywhere = _step_active_anywhere(sid, all_recipes)
+            if not self._show_all and (not active_anywhere or not has_diff):
+                continue
 
-            # En-tête étape
-            step_name = _STEP_NAMES.get(sid, sid)
-            badge = "✓" if enabled else "✗"
-            badge_color = "#6e6" if enabled else "#c66"
-            diff_icon = " ⚡" if has_any_diff else ""
-
-            header = QLabel(
-                f'<span style="color:{badge_color}">{badge}</span> '
-                f'<b>{step_name}</b>'
-                f'<span style="color:#f80">{diff_icon}</span>'
+            section = _FoldSection(
+                title=_step_title(sid, enabled),
+                summary=_step_summary(enabled, params, enabled_diffs, param_diffs),
+                accent="#3a8fd4" if has_diff else "#303052",
+                expanded=False,
             )
-            header.setStyleSheet("font-size: 11px; color: #ccc; background: transparent;")
-            slayout.addWidget(header)
-
-            # Diff enabled
             if enabled_diffs:
+                section.add_row("Activation", "différente", changed=True)
                 for o_idx, o_val in enabled_diffs:
-                    o_str = "✓" if o_val else "✗"
-                    dl = QLabel(
-                        f'  <span style="color:#888">Export {o_idx:03d}:</span>'
-                        f' <span style="color:#f80">{o_str}</span>'
-                    )
-                    dl.setStyleSheet("font-size: 10px; background: transparent;")
-                    slayout.addWidget(dl)
+                    section.add_diff(o_idx, "activée" if o_val else "désactivée")
 
-            # Paramètres
-            for key in sorted(params.keys()):
-                val = params[key]
+            keys = sorted(params.keys())
+            for key in keys:
                 diffs = param_diffs.get(key, [])
-                has_diff = bool(diffs)
-
-                if not self._show_all and not has_diff:
+                if not self._show_all and not diffs:
                     continue
-
-                val_color = "#f90" if has_diff else "#999"
-                plabel = QLabel(
-                    f'  <span style="color:#777">{key}:</span>'
-                    f' <span style="color:{val_color}">{_format_val(val)}</span>'
-                )
-                plabel.setWordWrap(True)
-                plabel.setStyleSheet("font-size: 10px; background: transparent;")
-                slayout.addWidget(plabel)
-
-                if has_diff:
-                    for o_idx, o_val in diffs[:3]:
-                        dl = QLabel(
-                            f'    <span style="color:#555">#{o_idx:03d}:</span>'
-                            f' <span style="color:#886">{_format_val(o_val)}</span>'
-                        )
-                        dl.setStyleSheet("font-size: 9px; background: transparent;")
-                        slayout.addWidget(dl)
-
-            self._steps_layout.addWidget(step_widget)
+                section.add_row(key, _format_val(params.get(key)), changed=bool(diffs))
+                for o_idx, o_val in diffs[:4]:
+                    section.add_diff(o_idx, _format_val(o_val))
+                if len(diffs) > 4:
+                    section.add_note(f"+{len(diffs) - 4} autre(s) export(s)")
+            self._steps_layout.addWidget(section)
 
     def _build_global_params(self, recipe: dict, other_recipes: list):
-        """Affiche les paramètres globaux (wb_pick, wb_patch_radius) avec diff."""
-        global_keys = [
-            ("wb_pick", "Position balance blancs"),
-            ("wb_patch_radius", "Rayon patch WB"),
-        ]
-        diffs_found = []
-        for key, label in global_keys:
-            val = recipe.get(key)
-            others = []
-            has_diff = False
-            for o_idx, o_recipe in other_recipes:
-                o_val = o_recipe.get(key)
-                if o_val != val:
-                    has_diff = True
-                    others.append((o_idx, o_val))
-            if has_diff or self._show_all:
-                diffs_found.append((key, label, val, others, has_diff))
-
-        if not diffs_found:
+        items = []
+        for key, label in (
+            ("crop_rect", "Recadrage"),
+            ("wb_pick", "Point WB"),
+            ("wb_patch_radius", "Rayon WB"),
+        ):
+            value = recipe.get(key)
+            diffs = [
+                (idx, other.get(key))
+                for idx, other in other_recipes
+                if other.get(key) != value
+            ]
+            if self._show_all or diffs:
+                items.append((label, value, diffs))
+        if not items:
             return
 
-        frame = QFrame()
-        frame.setStyleSheet(
-            "QFrame { background: #1e1e32; border-radius: 3px;"
-            "  border-left: 3px solid #3a8fd4; padding: 4px; margin: 1px 0; }"
+        diff_count = sum(1 for _, _, diffs in items if diffs)
+        section = _FoldSection(
+            title="Paramètres globaux",
+            summary=f"{diff_count} différence(s) · {len(items)} valeur(s)",
+            accent="#3a8fd4" if diff_count else "#303052",
+            expanded=False,
         )
-        flayout = QVBoxLayout(frame)
-        flayout.setContentsMargins(8, 4, 4, 4)
-        flayout.setSpacing(2)
+        for label, value, diffs in items:
+            section.add_row(label, _format_val(value), changed=bool(diffs))
+            for idx, other_value in diffs[:4]:
+                section.add_diff(idx, _format_val(other_value))
+        self._steps_layout.addWidget(section)
 
-        header = QLabel('<b>Paramètres globaux</b> <span style="color:#f80">⚡</span>')
-        header.setStyleSheet("font-size: 11px; color: #ccc; background: transparent;")
-        flayout.addWidget(header)
 
-        for key, label, val, others, has_diff in diffs_found:
-            val_color = "#f90" if has_diff else "#999"
-            plabel = QLabel(
-                f'  <span style="color:#777">{label}:</span>'
-                f' <span style="color:{val_color}">{_format_val(val)}</span>'
-            )
-            plabel.setWordWrap(True)
-            plabel.setStyleSheet("font-size: 10px; background: transparent;")
-            flayout.addWidget(plabel)
-            if has_diff:
-                for o_idx, o_val in others[:3]:
-                    dl = QLabel(
-                        f'    <span style="color:#555">#{o_idx:03d}:</span>'
-                        f' <span style="color:#886">{_format_val(o_val)}</span>'
-                    )
-                    dl.setStyleSheet("font-size: 9px; background: transparent;")
-                    flayout.addWidget(dl)
+def _diffs_for_step(sid: str, enabled: bool, params: dict, other_recipes: list):
+    enabled_diffs = []
+    param_diffs: dict[str, list[tuple[int, object]]] = {}
+    for o_idx, o_recipe in other_recipes:
+        o_enabled = o_recipe.get("step_enabled", {}).get(sid)
+        if o_enabled is not None and o_enabled != enabled:
+            enabled_diffs.append((o_idx, o_enabled))
+        o_params = o_recipe.get("step_params", {}).get(sid, {})
+        for key in sorted(set(params.keys()) | set(o_params.keys())):
+            val = params.get(key)
+            other = o_params.get(key)
+            if val != other:
+                param_diffs.setdefault(key, []).append((o_idx, other))
+    return enabled_diffs, param_diffs
 
-        self._steps_layout.addWidget(frame)
+
+def _step_active_anywhere(sid: str, all_recipes: list[tuple[int, dict]]) -> bool:
+    return any(recipe.get("step_enabled", {}).get(sid, False) for _, recipe in all_recipes)
+
+
+def _step_title(sid: str, enabled: bool) -> str:
+    state = "✓" if enabled else "✗"
+    name = _STEP_SHORT_NAMES.get(sid) or _STEP_NAMES.get(sid, sid)
+    return f"{state} {name}"
+
+
+def _step_summary(
+    enabled: bool,
+    params: dict,
+    enabled_diffs: list,
+    param_diffs: dict,
+) -> str:
+    changed = len(param_diffs) + (1 if enabled_diffs else 0)
+    state = "activée" if enabled else "désactivée"
+    if changed:
+        return f"{state} · {changed} différence(s) · {len(params)} paramètre(s)"
+    return f"{state} · {len(params)} paramètre(s)"
 
 
 def _format_val(val) -> str:
-    """Formate une valeur de paramètre pour l'affichage."""
     if isinstance(val, float):
         return f"{val:.3g}"
+    if isinstance(val, bool):
+        return "oui" if val else "non"
     if val is None:
         return "—"
-    return str(val)
+    text = str(val)
+    if len(text) > 90:
+        return text[:87] + "..."
+    return text

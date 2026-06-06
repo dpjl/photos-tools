@@ -104,6 +104,7 @@ class NavMixin:
             self._mask_panel.set_image(display, cfg.inpaint_mask)
             self._wb_panel.set_image(display, cfg.wb_pick, cfg.wb_patch_radius)
             self._redeye_panel.set_image(display, cfg.redeye_mask)
+            self._crop_panel.set_image(img, cfg.crop_rect)
 
         # ── Onglet Originale ──────────────────────────────────────────────────
         self._origin_view.set_image(img)
@@ -112,6 +113,7 @@ class NavMixin:
         if img is not None:
             self._preview_view.set_image(img)
             self._preview_status_lbl.setText("…")
+            self._update_preview_info(img)
 
         # ── Onglet Résultat (chargement lazeux si onglet actif) ───────────────
         if self._tabs.currentIndex() == _TAB_RESULT:
@@ -178,6 +180,7 @@ class NavMixin:
         cfg.inpaint_mask = raw_mask if (raw_mask is not None and raw_mask.any()) else None
         raw_redeye = self._redeye_panel.get_mask()
         cfg.redeye_mask = raw_redeye if (raw_redeye is not None and raw_redeye.any()) else None
+        cfg.crop_rect = self._crop_panel.get_crop_rect()
         cfg.wb_pick = self._wb_panel.get_pick_point()
         cfg.wb_patch_radius = self._wb_panel.get_patch_radius()
 
@@ -212,6 +215,10 @@ class NavMixin:
             else:
                 wb_step.clear_pick_point()
 
+        crop_step = self._steps_by_id.get("crop")
+        if crop_step and hasattr(crop_step, "set_crop_rect"):
+            crop_step.set_crop_rect(cfg.crop_rect)
+
     def _clear_instance_state(self) -> None:
         """Réinitialise les singletons à la fermeture."""
         inpaint_step = self._steps_by_id.get("inpaint")
@@ -223,6 +230,9 @@ class NavMixin:
         wb_step = self._steps_by_id.get("wb")
         if wb_step and hasattr(wb_step, "clear_pick_point"):
             wb_step.clear_pick_point()
+        crop_step = self._steps_by_id.get("crop")
+        if crop_step and hasattr(crop_step, "clear_crop_rect"):
+            crop_step.clear_crop_rect()
 
     # ── Rechargement depuis disque ────────────────────────────────────────────
 

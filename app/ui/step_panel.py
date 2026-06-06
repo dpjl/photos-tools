@@ -101,6 +101,7 @@ class StepPanel(QWidget):
     drag_requested          = pyqtSignal(str)               # step_id — relayé depuis DragHandle
     overlay_toggled         = pyqtSignal(str, bool)          # (step_id, enabled) — sans recalcul
     mask_edit_requested     = pyqtSignal(str)               # step_id — ouvrir l'éditeur de masque
+    crop_edit_requested     = pyqtSignal(str)               # step_id — ouvrir l'éditeur de crop
     color_picker_requested  = pyqtSignal(str)               # step_id — ouvrir la pipette WB
 
     def __init__(self, step, parent=None):
@@ -264,6 +265,24 @@ class StepPanel(QWidget):
                 lambda: self.mask_edit_requested.emit(self._step.id)
             )
             body_layout.addWidget(btn_mask)
+
+        # Bouton Dessiner recadrage (seulement si has_crop_editor=True)
+        if getattr(self._step, "has_crop_editor", False):
+            sep_crop = QFrame()
+            sep_crop.setFrameShape(QFrame.Shape.HLine)
+            sep_crop.setStyleSheet("background: #2a2a3a; margin: 2px 0;")
+            sep_crop.setFixedHeight(1)
+            body_layout.addWidget(sep_crop)
+            btn_crop = QPushButton("▣  Dessiner recadrage")
+            btn_crop.setStyleSheet(
+                "QPushButton { background: #1e3a52; color: #b8e0f7; border-radius: 4px;"
+                "  padding: 5px 12px; font-size: 11px; }"
+                "QPushButton:hover { background: #2a5577; }"
+            )
+            btn_crop.clicked.connect(
+                lambda: self.crop_edit_requested.emit(self._step.id)
+            )
+            body_layout.addWidget(btn_crop)
 
         # Bouton Selectionner point blanc (seulement si has_color_picker=True)
         if getattr(self._step, "has_color_picker", False):
@@ -489,6 +508,7 @@ class StepListWidget(QWidget):
     rerun_requested             = pyqtSignal(str)
     overlay_toggled             = pyqtSignal(str, bool)
     mask_edit_requested         = pyqtSignal(str)
+    crop_edit_requested         = pyqtSignal(str)
     color_picker_requested      = pyqtSignal(str)
 
     def __init__(self, parent=None):
@@ -526,6 +546,7 @@ class StepListWidget(QWidget):
             panel.rerun_requested.connect(self.rerun_requested)
             panel.overlay_toggled.connect(self.overlay_toggled)
             panel.mask_edit_requested.connect(self.mask_edit_requested)
+            panel.crop_edit_requested.connect(self.crop_edit_requested)
             panel.color_picker_requested.connect(self.color_picker_requested)
             self._panels[step.id] = panel
             self._order.append(step.id)

@@ -26,6 +26,8 @@ class SCUNetStep(StepBase):
          "as_buttons": True, "default": "gan", "choices": ["gan", "psnr"]},
         {"key": "protect_faces", "label": "Protéger visages", "type": "bool",
          "default": True},
+        {"key": "strength", "label": "Force", "type": "float",
+         "default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05},
         {"key": "expand", "label": "Expansion visage", "type": "float",
          "default": 0.4, "min": 0.0, "max": 1.0, "step": 0.05},
     ]
@@ -66,10 +68,14 @@ class SCUNetStep(StepBase):
     def process(self, img: np.ndarray, params: dict, context: dict):
         mode          = params.get("mode", "gan")
         protect_faces = bool(params.get("protect_faces", True))
+        strength      = float(params.get("strength", 1.0))
         expand        = float(params.get("expand", 0.4))
         self._load(mode)
 
         result = _run_scunet(self._model, img, self._device)
+        if strength < 0.999:
+            a = max(0.0, min(1.0, strength))
+            result = cv2.addWeighted(img, 1.0 - a, result, a, 0.0)
 
         # Protection des visages : recomposer depuis GFPGAN si activé
         if protect_faces:
