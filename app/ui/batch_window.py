@@ -54,6 +54,7 @@ from ui.batch_window_constants import (
     _TAB_ORIGIN, _TAB_RESULT,
 )
 from core.export_manager import ExportManager, ExportEntry
+from core.image_metadata import write_jpeg_with_source_exif
 from ui.batch_mixins.nav import NavMixin
 from ui.batch_mixins.params import ParamsMixin
 from ui.batch_mixins.preview import PreviewMixin
@@ -668,13 +669,13 @@ class BatchWindow(
         if not configs:
             return
 
-        # Collecter les paires (stem, ext) à exporter
-        items: list[tuple[str, str, str]] = []  # (stem, ext, original_filename)
+        # Collecter les exports retenus avec leur photo source pour recopier l'EXIF
+        items: list[tuple[str, str, str]] = []  # (stem, export_path, source_path)
         for cfg in configs:
             stem, ext = os.path.splitext(cfg.filename)
             best = mgr.get_best_entry(stem, ext)
             if best and os.path.exists(best.image_path):
-                items.append((stem, best.image_path, cfg.filename))
+                items.append((stem, best.image_path, cfg.file_path))
 
         if not items:
             self._statusbar.showMessage("Aucun export à exporter.")
@@ -691,7 +692,7 @@ class BatchWindow(
         QApplication.processEvents()
 
         exported = 0
-        for i, (stem, src_path, original_name) in enumerate(items):
+        for i, (stem, src_path, source_path) in enumerate(items):
             if progress.wasCanceled():
                 break
             progress.setValue(i)
@@ -704,13 +705,16 @@ class BatchWindow(
 
             jpg_name = stem + ".jpg"
             jpg_path = os.path.join(dest, jpg_name)
-            cv2.imwrite(
-                jpg_path, img,
-                [cv2.IMWRITE_JPEG_QUALITY, 95,
-                 cv2.IMWRITE_JPEG_OPTIMIZE, 1,
-                 cv2.IMWRITE_JPEG_PROGRESSIVE, 1],
+            ok = write_jpeg_with_source_exif(
+                img,
+                jpg_path,
+                source_path,
+                quality=95,
+                optimize=True,
+                progressive=True,
             )
-            exported += 1
+            if ok:
+                exported += 1
 
         progress.setValue(len(items))
         self._statusbar.showMessage(
