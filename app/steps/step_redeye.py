@@ -187,7 +187,7 @@ class RedEyeStep(StepBase):
         return result, {"redeye_detections": detections, "face_bboxes": face_bboxes}
 
     def _process_manual(self, img: np.ndarray, strength: float):
-        """Mode manuel : correction des pixels marqués dans le masque peint."""
+        """Mode manuel : correction intelligente des pixels rouges dans la zone peinte."""
         if self._redeye_mask is None or not self._redeye_mask.any():
             return img.copy(), {"redeye_detections": []}
 
@@ -196,17 +196,54 @@ class RedEyeStep(StepBase):
         if mask.shape[:2] != (h, w):
             mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
 
-        result = _correct_pixels_gaussian(
-            img.copy(), mask,
-            iris_center_xy=np.array([0.0, 0.0]),  # non utilisé (centroïde auto)
-            iris_radius=max(h, w),                 # pas de cutoff
-            strength=strength,
-        )
-        red_px = int((mask > 0).sum())
+        result = _correct_manual_zone(img.copy(), mask, strength)
+        corrected = not np.array_equal(result, img)
         return result, {"redeye_detections": [{
             "iris": (w / 2.0, h / 2.0, 0.0),
-            "corrected": red_px > 0,
+            "corrected": corrected,
         }]}
+
+    def detect_iris_mask(self, img: np.ndarray, margin: float = 1.3) -> np.ndarray | None:
+        """Détecte les iris et retourne un masque de cercles (pour le mode manuel)."""
+        import mediapipe as mp
+        h, w = img.shape[:2]
+        mask = np.zeros((h, w), dtype=np.uint8)
+
+        faces = _detect_faces_retina(img, self._get_face_helper())
+        crops: list[tuple[int, int, np.ndarray, int]] = []
+        if faces:
+            for (x1, y1, x2, y2, _s) in faces:
+                ex1, ey1, ex2, ey2 = _expand_box(x1, y1, x2, y2, w, h)
+                crops.append((ex1, ey1, img[ey1:ey2, ex1:ex2].copy(), _UPSCALE))
+        else:
+            crops.append((0, 0, img.copy(), 1))
+
+        for ox, oy, crop, upscale in crops:
+            ch, cw = crop.shape[:2]
+            up = (cv2.resize(crop, (cw * upscale, ch * upscale),
+                             interpolation=cv2.INTER_CUBIC)
+                  if upscale > 1 else crop.copy())
+            up_rgb   = cv2.cvtColor(up, cv2.COLOR_BGR2RGB)
+            mp_img   = mp.Image(image_format=mp.ImageFormat.SRGB, data=up_rgb)
+            result   = self._get_landmarker().detect(mp_img)
+            if not result.face_landmarks:
+                continue
+            for landmarks in result.face_landmarks[:1]:
+                for iris_indices in (_RIGHT_IRIS, _LEFT_IRIS):
+                    _, iris_pts = _iris_mask_from_landmarks(up.shape, landmarks, iris_indices)
+                    if iris_pts is None:
+                        continue
+                    pts_f   = iris_pts.astype(np.float32)
+                    center  = pts_f.mean(axis=0)
+                    iris_w  = pts_f[:, 0].max() - pts_f[:, 0].min()
+                    iris_h  = pts_f[:, 1].max() - pts_f[:, 1].min()
+                    iris_r  = max(_MIN_IRIS_R * upscale, (iris_w + iris_h) / 4.0)
+                    ix = int(ox + center[0] / upscale)
+                    iy = int(oy + center[1] / upscale)
+                    ir = max(int(iris_r / upscale * margin), int(_MIN_IRIS_R) + 1)
+                    cv2.circle(mask, (ix, iy), ir, 255, -1)
+
+        return mask if cv2.countNonZero(mask) > 0 else None
 
 
 # ── Détection visages ─────────────────────────────────────────────────────────
@@ -491,6 +528,52 @@ def _lm_points(landmarks, indices, w, h):
     )
 
 
+def _red_candidate(img_bgr, search_mask):
+    """Masque binaire des pixels rouges candidats dans search_mask.
+
+    Filtres couleur partagés entre le profil étendu et le mode manuel
+    (HSV teinte rouge + score redness + conditions R/G/B).
+    """
+    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+    r_f = img_bgr[:, :, 2].astype(np.float32)
+    g_f = img_bgr[:, :, 1].astype(np.float32)
+    b_f = img_bgr[:, :, 0].astype(np.float32)
+    redness = r_f - 0.55 * g_f - 0.45 * b_f
+
+    red_hue = cv2.bitwise_or(
+        cv2.inRange(hsv, np.array([0,   45, 30]), np.array([12,  255, 255])),
+        cv2.inRange(hsv, np.array([168, 45, 30]), np.array([180, 255, 255])),
+    )
+
+    candidate = (
+        (red_hue > 0)
+        & (redness > 25)
+        & (r_f > 65)
+        & (r_f > g_f * 1.25)
+        & (r_f > b_f * 1.25)
+        & (search_mask > 0)
+    )
+    return candidate.astype(np.uint8) * 255
+
+
+def _filter_red_components(mask, central_seed, max_area):
+    """Garde les composantes connexes touchant central_seed et d'aire <= max_area."""
+    n, labels, comp_stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+    final_mask = np.zeros_like(mask)
+    kept = 0
+    for lbl in range(1, n):
+        area = comp_stats[lbl, cv2.CC_STAT_AREA]
+        if area < 3:
+            continue
+        if area > max_area:
+            continue
+        component = (labels == lbl).astype(np.uint8) * 255
+        if cv2.countNonZero(cv2.bitwise_and(component, central_seed)) > 0:
+            final_mask[labels == lbl] = 255
+            kept += 1
+    return final_mask, kept
+
+
 def _red_eye_mask_extended(img_bgr, landmarks, iris_indices, eye_contour_indices,
                            iris_points, upscale):
     """Masque rouge étendu : zone élargie ∩ contour oeil + centralité.
@@ -525,29 +608,9 @@ def _red_eye_mask_extended(img_bgr, landmarks, iris_indices, eye_contour_indices
         cv2.fillPoly(eye_mask, [eye_pts], 255)
         search_mask = cv2.bitwise_and(search_mask, eye_mask)
 
-    # Filtres couleur identiques au profil classique
-    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
-    r_f = img_bgr[:, :, 2].astype(np.float32)
-    g_f = img_bgr[:, :, 1].astype(np.float32)
-    b_f = img_bgr[:, :, 0].astype(np.float32)
-    redness = r_f - 0.55 * g_f - 0.45 * b_f
-
-    red_hue = cv2.bitwise_or(
-        cv2.inRange(hsv, np.array([0,   45, 30]), np.array([12,  255, 255])),
-        cv2.inRange(hsv, np.array([168, 45, 30]), np.array([180, 255, 255])),
-    )
-
-    candidate = (
-        (red_hue > 0)
-        & (redness > 25)
-        & (r_f > 65)
-        & (r_f > g_f * 1.25)
-        & (r_f > b_f * 1.25)
-        & (search_mask > 0)
-    )
-
-    mask   = candidate.astype(np.uint8) * 255
+    # Filtres couleur (partagés avec le mode manuel)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    mask   = _red_candidate(img_bgr, search_mask)
     mask   = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
     mask   = cv2.morphologyEx(
         mask, cv2.MORPH_CLOSE,
@@ -560,20 +623,9 @@ def _red_eye_mask_extended(img_bgr, landmarks, iris_indices, eye_contour_indices
     central_seed = np.zeros((h, w), dtype=np.uint8)
     cv2.ellipse(central_seed, center_int, (seed_rx, seed_ry), 0, 0, 360, 255, -1)
 
-    n, labels, comp_stats, centroids = cv2.connectedComponentsWithStats(mask, 8)
-    final_mask      = np.zeros_like(mask)
-    kept_components = 0
-
-    for lbl in range(1, n):
-        area = comp_stats[lbl, cv2.CC_STAT_AREA]
-        if area < 3:
-            continue
-        if area > np.pi * (search_r ** 2) * 0.85:
-            continue
-        component = (labels == lbl).astype(np.uint8) * 255
-        if cv2.countNonZero(cv2.bitwise_and(component, central_seed)) > 0:
-            final_mask[labels == lbl] = 255
-            kept_components += 1
+    final_mask, kept_components = _filter_red_components(
+        mask, central_seed, np.pi * (search_r ** 2) * 0.85,
+    )
 
     final_mask = cv2.morphologyEx(final_mask, cv2.MORPH_OPEN, kernel)
     if eye_mask is not None:
@@ -590,38 +642,31 @@ def _red_eye_mask_extended(img_bgr, landmarks, iris_indices, eye_contour_indices
     }
 
 
-def _correct_pixels_smooth(img_bgr, mask, iris_points, eye_contour_indices,
-                           landmarks, iris_radius, strength):
-    """Correction avec masque lissé et pondération par redness.
+def _correct_smooth_core(img_bgr, mask, bound_mask, iris_radius, strength):
+    """Cœur de la correction lissée, partagé par le profil étendu et le mode manuel.
 
-    Le masque binaire est dilaté puis flouté (GaussianBlur) pour une transition
-    douce aux bords.  L'intensité de correction est proportionnelle au score
-    de redness du pixel (les pixels les plus rouges sont corrigés plus fort).
+    Le masque rouge binaire est dilaté, flouté (GaussianBlur) et borné par
+    bound_mask pour une transition douce.  L'intensité de correction est
+    pondérée par le score de redness (les pixels les plus rouges sont corrigés
+    plus fort) et par une gaussienne centrée sur le centroïde du rouge.
     """
     if cv2.countNonZero(mask) < 4:
         return img_bgr
 
     h, w = img_bgr.shape[:2]
 
-    # Construire le masque du contour de l'oeil pour borner le lissage
-    eye_pts  = _lm_points(landmarks, eye_contour_indices, w, h)
-    eye_mask = None
-    if len(eye_pts) >= 6:
-        eye_mask = np.zeros((h, w), dtype=np.uint8)
-        cv2.fillPoly(eye_mask, [eye_pts], 255)
-
     # Dilater + Gaussian blur → transition douce
     smooth_k    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     smooth_mask = cv2.dilate(mask, smooth_k, iterations=1)
-    if eye_mask is not None:
-        smooth_mask = cv2.bitwise_and(smooth_mask, eye_mask)
+    if bound_mask is not None:
+        smooth_mask = cv2.bitwise_and(smooth_mask, bound_mask)
     blur_size = max(3, int(iris_radius * 0.3) | 1)
     alpha_map = cv2.GaussianBlur(
         smooth_mask.astype(np.float32) / 255.0,
         (blur_size, blur_size), 0,
     )
-    if eye_mask is not None:
-        alpha_map[eye_mask == 0] = 0.0
+    if bound_mask is not None:
+        alpha_map[bound_mask == 0] = 0.0
 
     total = float(alpha_map.sum())
     if total < 1.0:
@@ -656,6 +701,112 @@ def _correct_pixels_smooth(img_bgr, mask, iris_points, eye_contour_indices,
         g_f.astype(np.uint8),
         np.clip(R_new, 0, 255).astype(np.uint8),
     ])
+
+
+def _correct_pixels_smooth(img_bgr, mask, iris_points, eye_contour_indices,
+                           landmarks, iris_radius, strength):
+    """Profil étendu : correction lissée bornée par le contour de l'œil."""
+    h, w = img_bgr.shape[:2]
+
+    # Construire le masque du contour de l'oeil pour borner le lissage
+    eye_pts  = _lm_points(landmarks, eye_contour_indices, w, h)
+    eye_mask = None
+    if len(eye_pts) >= 6:
+        eye_mask = np.zeros((h, w), dtype=np.uint8)
+        cv2.fillPoly(eye_mask, [eye_pts], 255)
+
+    return _correct_smooth_core(img_bgr, mask, eye_mask, iris_radius, strength)
+
+
+# ── Correction manuelle intelligente ─────────────────────────────────────────
+
+def _correct_manual_zone(img_bgr: np.ndarray, painted_mask: np.ndarray,
+                         strength: float) -> np.ndarray:
+    """Correction manuelle : chaque pastille peinte est traitée comme un iris.
+
+    Pour CHAQUE composante connexe du masque peint, on reproduit le pipeline du
+    profil automatique « étendu » : crop + upscale ×3 (INTER_CUBIC), détection du
+    rouge (mêmes filtres couleur + morphologie + filtrage des composantes),
+    correction lissée, puis downscale (INTER_AREA).  La pastille joue le rôle de
+    la zone de recherche (iris × 1.8 ∩ contour œil) et borne le lissage.
+
+    L'upscale ×3 est essentiel : à l'échelle native une pupille fait ~5 px de
+    rayon et la morphologie (noyaux 3×3 / 5×5) effacerait la zone rouge.  En
+    traitant à la même échelle que le mode automatique, un masque bien positionné
+    sur une pupille donne le même résultat que la détection automatique.
+    """
+    h, w = img_bgr.shape[:2]
+    bin_mask = (painted_mask > 0).astype(np.uint8)
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(bin_mask, 8)
+    if n <= 1:
+        return img_bgr
+
+    result = img_bgr.copy()
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    close_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    UP = _UPSCALE
+
+    for lbl in range(1, n):
+        bx = int(stats[lbl, cv2.CC_STAT_LEFT])
+        by = int(stats[lbl, cv2.CC_STAT_TOP])
+        bw = int(stats[lbl, cv2.CC_STAT_WIDTH])
+        bh = int(stats[lbl, cv2.CC_STAT_HEIGHT])
+        blob_r = max(bw, bh) / 2.0
+
+        # Crop expansé autour de la pastille (marge pour le lissage)
+        pad = int(blob_r * 1.5) + 4
+        x1 = max(0, bx - pad)
+        y1 = max(0, by - pad)
+        x2 = min(w, bx + bw + pad)
+        y2 = min(h, by + bh + pad)
+        if x2 - x1 < 2 or y2 - y1 < 2:
+            continue
+
+        crop = result[y1:y2, x1:x2]
+        comp = (labels[y1:y2, x1:x2] == lbl).astype(np.uint8) * 255
+        ch, cw = crop.shape[:2]
+
+        up        = cv2.resize(crop, (cw * UP, ch * UP), interpolation=cv2.INTER_CUBIC)
+        up_search = cv2.resize(comp, (cw * UP, ch * UP), interpolation=cv2.INTER_NEAREST)
+
+        # Géométrie de la pastille dans l'espace upscalé
+        m = cv2.moments(comp, binaryImage=True)
+        if m["m00"] <= 0:
+            continue
+        center_int = (int(round(m["m10"] / m["m00"] * UP)),
+                      int(round(m["m01"] / m["m00"] * UP)))
+        search_r = blob_r * UP
+        # Le bouton « auto » peint un rayon = iris_r × 1.3 → on remonte à iris_r
+        iris_r_up = max(_MIN_IRIS_R * UP, (blob_r / 1.3) * UP)
+
+        # Détection du rouge (mêmes opérations que le profil étendu)
+        mask = _red_candidate(up, up_search)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_k)
+
+        seed_r = max(int(search_r / 3), 2)
+        central_seed = np.zeros(up.shape[:2], dtype=np.uint8)
+        cv2.circle(central_seed, center_int, seed_r, 255, -1)
+        final_mask, _ = _filter_red_components(
+            mask, central_seed, np.pi * (search_r ** 2) * 0.85,
+        )
+        final_mask = cv2.morphologyEx(final_mask, cv2.MORPH_OPEN, kernel)
+        final_mask = cv2.bitwise_and(final_mask, up_search)
+
+        if cv2.countNonZero(final_mask) < _MIN_RED_PIXELS:
+            continue
+
+        corrected_up = _correct_smooth_core(up, final_mask, up_search, iris_r_up, strength)
+        down = cv2.resize(corrected_up, (cw, ch), interpolation=cv2.INTER_AREA)
+
+        # N'écrire que les pixels de la pastille (la correction est bornée par
+        # up_search, donc rien ne change en dehors) → pas d'artefact de
+        # rééchantillonnage sur la peau environnante.
+        region = result[y1:y2, x1:x2]
+        sel = comp > 0
+        region[sel] = down[sel]
+
+    return result
 
 
 # ── Fallbacks ─────────────────────────────────────────────────────────────────

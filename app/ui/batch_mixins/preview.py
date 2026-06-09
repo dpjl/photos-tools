@@ -141,6 +141,9 @@ class PreviewMixin:
         """Calcule le fast-pipeline si l'onglet actif est éligible et que l'aperçu est périmé."""
         if not self._preview_stale:
             return
+        if (self._worker is not None and self._worker.isRunning()) or \
+           (self._full_preview_worker is not None and self._full_preview_worker.isRunning()):
+            return
         idx = self._tabs.currentIndex()
         if idx in _PREVIEW_TABS:
             self._compute_and_show_fast_preview()

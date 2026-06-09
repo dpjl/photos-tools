@@ -511,6 +511,8 @@ class MaskCanvasPanel(QWidget):
         self._style(btn_undo)
         sl.addWidget(btn_undo)
 
+        self._sidebar_layout     = sl
+        self._sidebar_insert_idx = sl.count()   # position avant le stretch
         sl.addStretch()
 
         if show_ok_cancel:
@@ -531,6 +533,11 @@ class MaskCanvasPanel(QWidget):
 
     def get_mask(self) -> np.ndarray:
         return self._canvas.get_mask()
+
+    def add_to_sidebar(self, widget: "QWidget") -> None:
+        """Insère un widget dans la sidebar juste avant le stretch final."""
+        self._sidebar_layout.insertWidget(self._sidebar_insert_idx, widget)
+        self._sidebar_insert_idx += 1
 
     def set_image(
         self,

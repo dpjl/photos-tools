@@ -103,7 +103,7 @@ class NavMixin:
             display = result if result is not None else img
             self._mask_panel.set_image(display, cfg.inpaint_mask)
             self._wb_panel.set_image(display, cfg.wb_pick, cfg.wb_patch_radius)
-            self._redeye_panel.set_image(display, cfg.redeye_mask)
+            self._redeye_panel.set_image(img, cfg.redeye_mask)
             self._crop_panel.set_image(img, cfg.crop_rect)
 
         # ── Onglet Originale ──────────────────────────────────────────────────
