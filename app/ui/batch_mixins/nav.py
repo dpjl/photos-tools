@@ -82,6 +82,13 @@ class NavMixin:
         self._preview_full_img = None
         self._last_fast_preview = None
 
+        # Invalider le cache de détection d'artefacts (lié à l'image précédente)
+        self._artifact_probs = None
+        self._artifact_base_mask = None
+        self._artifact_base_image = None
+        self._artifact_spots = None
+        self._artifact_spots_dev = -1.0
+
         # ── Image originale ───────────────────────────────────────────────────
         img = cv2.imread(cfg.file_path, cv2.IMREAD_COLOR)
         self._current_orig = img

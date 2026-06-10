@@ -90,6 +90,13 @@ MODELS = [
         "https://github.com/Sanster/models/releases/download/add_big_lama/big-lama.pt",
         207,
     ),
+    # ── Détection d'artefacts (rayures/plis) — Microsoft BOPBTL ───────────────
+    (
+        os.path.join(MODELS_DIR, "bopbtl_detection", "FT_Epoch_latest.pt"),
+        "https://huggingface.co/databuzzword/bringing-old-photos-back-to-life/"
+        "resolve/main/Global/checkpoints/detection/FT_Epoch_latest.pt",
+        431,
+    ),
 ]
 
 # ── DDColor est géré séparément via HuggingFace hub ───────────────────────────

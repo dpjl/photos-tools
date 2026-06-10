@@ -55,6 +55,10 @@ class MaskCanvas(QWidget):
         self._img_w, self._img_h = iw, ih
         self._display_w, self._display_h = iw, ih
 
+        # Image actuellement affichée en BGR (= base au départ, puis preview courant
+        # via set_display_image). Sert de source à la détection auto d'artefacts.
+        self._display_bgr = image_bgr.copy()
+
         # Pixmap base (image seule, creee une fois puis eventuellement remplacee)
         self._base_pixmap: QPixmap = self._make_rgb_pixmap(self._orig_img_rgb)
 
@@ -79,6 +83,10 @@ class MaskCanvas(QWidget):
         self._undo_stack: list[np.ndarray] = []
         self._redo_stack: list[np.ndarray] = []  # vidé à chaque nouveau trait
 
+        # Sélection d'une zone (composante connexe) + mode « peek »
+        self._selected_mask: np.ndarray | None = None   # uint8, zone sélectionnée
+        self._peek:          bool               = False  # masque l'overlay pour voir dessous
+
         # Zoom / pan
         self._zoom:     float          = 1.0
         self._pan_x:    float          = 0.0
@@ -101,6 +109,7 @@ class MaskCanvas(QWidget):
         ih, iw = self._orig_img_rgb.shape[:2]
         self._img_w, self._img_h = iw, ih
         self._display_w, self._display_h = iw, ih
+        self._display_bgr = image_bgr.copy()
         self._base_pixmap = self._make_rgb_pixmap(self._orig_img_rgb)
         if initial_mask is not None and initial_mask.shape[:2] == (ih, iw):
             self._mask = initial_mask.copy()
@@ -110,6 +119,8 @@ class MaskCanvas(QWidget):
         self._composite_cache = None
         self._undo_stack.clear()
         self._redo_stack.clear()
+        self._selected_mask   = None
+        self._peek            = False
         self._painting        = False
         self._erasing         = False
         self._last_canvas_pt  = None
@@ -121,7 +132,8 @@ class MaskCanvas(QWidget):
         self.update()
 
     def set_display_image(self, bgr: np.ndarray) -> None:
-        """Change l'image affichee. Le masque n'est pas affecte."""
+        """Change l'image affichee (preview courant). Le masque n'est pas affecte."""
+        self._display_bgr = bgr.copy()
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         dh, dw = rgb.shape[:2]
         self._display_w, self._display_h = dw, dh
@@ -129,27 +141,80 @@ class MaskCanvas(QWidget):
         self._dirty = True
         self.update()
 
-    def set_mask(self, mask: np.ndarray) -> None:
-        """Remplace le masque (avec historique undo)."""
-        self._push_undo()
+    def get_display_image(self) -> np.ndarray:
+        """Image actuellement affichée en BGR (preview courant ou base)."""
+        return self._display_bgr.copy()
+
+    def set_mask(self, mask: np.ndarray, push_undo: bool = True) -> None:
+        """Remplace le masque. ``push_undo=False`` pour les mises à jour live."""
+        if push_undo:
+            self._push_undo()
         self._mask = mask.copy()
+        self._selected_mask = None
         self._invalidate()
+
+    def push_undo(self) -> None:
+        """Empile l'état courant (point de restauration avant une action externe)."""
+        self._push_undo()
 
     def clear_mask(self) -> None:
         self._push_undo()
         self._mask[:] = 0
+        self._selected_mask = None
         self._invalidate()
 
     def undo(self) -> None:
         if self._undo_stack:
             self._redo_stack.append(self._mask.copy())
             self._mask = self._undo_stack.pop()
+            self._selected_mask = None
             self._invalidate()
+
+    # ── Sélection / suppression d'une zone, peek ──────────────────────────────
+
+    def select_component_at(self, ix: int, iy: int) -> bool:
+        """Sélectionne la composante connexe du masque sous (ix, iy). Retourne True si OK."""
+        if not (0 <= iy < self._mask.shape[0] and 0 <= ix < self._mask.shape[1]):
+            return False
+        if self._mask[iy, ix] == 0:
+            self.clear_selection()
+            return False
+        n, labels = cv2.connectedComponents((self._mask > 0).astype(np.uint8), 8)
+        lbl = labels[iy, ix]
+        if lbl == 0:
+            return False
+        self._selected_mask = (labels == lbl).astype(np.uint8) * 255
+        self._invalidate()
+        return True
+
+    def clear_selection(self) -> None:
+        if self._selected_mask is not None:
+            self._selected_mask = None
+            self._invalidate()
+
+    def has_selection(self) -> bool:
+        return self._selected_mask is not None
+
+    def delete_selected_component(self) -> bool:
+        """Efface la zone sélectionnée du masque (undo possible)."""
+        if self._selected_mask is None:
+            return False
+        self._push_undo()
+        self._mask[self._selected_mask > 0] = 0
+        self._selected_mask = None
+        self._invalidate()
+        return True
+
+    def toggle_peek(self) -> None:
+        """Affiche/masque temporairement l'overlay rouge (voir la photo dessous)."""
+        self._peek = not self._peek
+        self._invalidate()
 
     def redo(self) -> None:
         if self._redo_stack:
             self._undo_stack.append(self._mask.copy())
             self._mask = self._redo_stack.pop()
+            self._selected_mask = None
             self._invalidate()
 
     def get_zoom_state(self) -> tuple:
@@ -281,6 +346,7 @@ class MaskCanvas(QWidget):
             if ctrl:
                 # Ctrl+clic gauche → peindre
                 self._push_undo()
+                self._selected_mask = None
                 self._painting = True
                 self._erasing  = False
                 self._last_canvas_pt = pos
@@ -289,16 +355,23 @@ class MaskCanvas(QWidget):
                     cv2.circle(self._mask, coords, self._brush_px, 255, -1)
                     self._invalidate()
             else:
-                # Clic gauche simple → déplacement
-                self._panning  = True
-                self._pan_last = pos
-                self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                # Clic gauche : sélectionner la zone rouge sous le curseur,
+                # sinon déplacer (pan).
+                coords = self._canvas_to_img(pos)
+                if coords and self._mask[coords[1], coords[0]] > 0:
+                    self.select_component_at(coords[0], coords[1])
+                else:
+                    self.clear_selection()
+                    self._panning  = True
+                    self._pan_last = pos
+                    self.setCursor(Qt.CursorShape.ClosedHandCursor)
             return
 
         if event.button() == Qt.MouseButton.RightButton:
             if ctrl:
                 # Ctrl+clic droit → effacer
                 self._push_undo()
+                self._selected_mask = None
                 self._erasing  = True
                 self._painting = False
                 self._last_canvas_pt = pos
@@ -353,7 +426,21 @@ class MaskCanvas(QWidget):
             self.brush_size_changed.emit(self._brush_px)
         event.accept()
 
-    # keyPressEvent supprimé : Ctrl+Z route via le parent (MaskEditorDialog ou BatchWindow)
+    def keyPressEvent(self, event):
+        """V = peek (voir dessous) ; Suppr/Retour arrière = effacer la zone sélectionnée.
+
+        Les autres touches (dont Ctrl+Z/Y) sont relayées au parent.
+        """
+        if event.modifiers() == Qt.KeyboardModifier.NoModifier:
+            if event.key() == Qt.Key.Key_V:
+                self.toggle_peek()
+                event.accept()
+                return
+            if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+                if self.delete_selected_component():
+                    event.accept()
+                    return
+        super().keyPressEvent(event)
 
     # ── Rendu ─────────────────────────────────────────────────────────────────
 
@@ -366,10 +453,16 @@ class MaskCanvas(QWidget):
         return QPixmap.fromImage(qimg)
 
     def _make_overlay_pixmap(self) -> QPixmap:
-        """Pixmap RGBA : rouge semi-transparent sur les zones masquees."""
+        """Pixmap RGBA : rouge (zones masquées), jaune (zone sélectionnée).
+
+        En mode « peek », l'overlay est entièrement transparent → on voit la photo.
+        """
         ih, iw = self._mask.shape
         rgba = np.zeros((ih, iw, 4), dtype=np.uint8)
-        rgba[self._mask > 127] = (255, 60, 60, 160)
+        if not self._peek:
+            rgba[self._mask > 127] = (255, 60, 60, 160)
+            if self._selected_mask is not None:
+                rgba[self._selected_mask > 0] = (255, 220, 40, 210)  # sélection en jaune
         data = np.ascontiguousarray(rgba)
         qimg = QImage(data.tobytes(), iw, ih, iw * 4, QImage.Format.Format_RGBA8888)
         return QPixmap.fromImage(qimg)
@@ -471,7 +564,10 @@ class MaskCanvasPanel(QWidget):
         tips = QLabel(
             "Ctrl + clic gauche  → peindre\n"
             "Ctrl + clic droit   → effacer\n"
-            "Clic gauche         → déplacer\n"
+            "Clic gauche (zone)  → sélectionner\n"
+            "  V                 → voir dessous\n"
+            "  Suppr             → effacer la zone\n"
+            "Clic gauche (vide)  → déplacer\n"
             "Molette             → taille pinceau\n"
             "Ctrl+Molette        → zoom\n"
             "Ctrl+Z / Ctrl+Y     → annuler/rétablir"
@@ -533,6 +629,26 @@ class MaskCanvasPanel(QWidget):
 
     def get_mask(self) -> np.ndarray:
         return self._canvas.get_mask()
+
+    def get_base_image(self) -> np.ndarray:
+        """Image de référence en BGR (espace de coordonnées du masque)."""
+        return cv2.cvtColor(self._canvas._orig_img_rgb, cv2.COLOR_RGB2BGR)
+
+    def get_display_image(self) -> np.ndarray:
+        """Image actuellement affichée en BGR (preview courant)."""
+        return self._canvas.get_display_image()
+
+    def mask_shape(self) -> tuple:
+        """Dimensions (h, w) de l'espace du masque."""
+        return (self._canvas._img_h, self._canvas._img_w)
+
+    def set_mask(self, mask: np.ndarray, push_undo: bool = True) -> None:
+        """Remplace le masque courant (``push_undo=False`` pour le live)."""
+        self._canvas.set_mask(mask, push_undo=push_undo)
+
+    def push_undo(self) -> None:
+        """Empile l'état courant du masque dans l'historique."""
+        self._canvas.push_undo()
 
     def add_to_sidebar(self, widget: "QWidget") -> None:
         """Insère un widget dans la sidebar juste avant le stretch final."""

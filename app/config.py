@@ -20,3 +20,11 @@ REALESRGAN_X4PLUS_PATH   = os.path.join(REALESRGAN_MODELS_DIR, "RealESRGAN_x4plu
 # DDColor modelscope (couleur IA)
 DDCOLOR_MODEL_REPO = "piddnad/ddcolor_modelscope"
 DDCOLOR_CACHE_DIR  = os.path.join(SCUNET_MODELS_DIR, "ddcolor_modelscope")
+
+# Détection automatique d'artefacts (rayures / plis) — Microsoft BOPBTL
+BOPBTL_DETECTION_DIR     = os.path.join(SCUNET_MODELS_DIR, "bopbtl_detection")
+BOPBTL_DETECTION_WEIGHTS = os.path.join(BOPBTL_DETECTION_DIR, "FT_Epoch_latest.pt")
+BOPBTL_DETECTION_URL     = (
+    "https://huggingface.co/databuzzword/bringing-old-photos-back-to-life/"
+    "resolve/main/Global/checkpoints/detection/FT_Epoch_latest.pt"
+)
