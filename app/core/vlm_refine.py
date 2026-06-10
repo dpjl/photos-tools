@@ -54,22 +54,40 @@ _MIN_LEN_DEFAULT   = 45     # longueur mini d'une ligne (px)
 _MIN_THICK_DEFAULT = 12     # épaisseur mini d'une « grosse tache » (px)
 _MIN_RATIO         = 2.2    # allongement mini d'une ligne (longueur / épaisseur)
 
-_PROMPT = (
+# Deux prompts dédiés (lignes vs taches) : un prompt unique tirait les lignes
+# vers "scene" dès qu'une catégorie large (peau, reflet, couture...) pouvait
+# s'appliquer, y compris pour de longues rayures bien réelles. Le prompt
+# "ligne" est celui validé sur 0031/0033 (cf. do-not-commit/_vlm3) : il ne
+# laisse que des catégories *linéaires* pour "scene", avec une règle stricte
+# sur les traits qui traversent librement plusieurs surfaces.
+_LINE_PROMPT = (
+    "Old scanned color photo (1985). Two views of the SAME candidate mark:\n"
+    "- IMAGE 1: whole photo; the mark is painted magenta with a yellow arrow.\n"
+    "- IMAGE 2: high-resolution zoom; the mark is outlined in magenta.\n"
+    "Decide if the marked thing is damage on the photo or a real part of the scene.\n"
+    "- \"defect\": scratch, scuff, crease, crack, dust/hair, stain ON the photo. "
+    "Often a bright/pale thin streak crossing freely over surfaces, unrelated to objects.\n"
+    "- \"scene\": furniture/door/window edge, wallpaper pattern line, cable, fabric seam.\n"
+    "Be careful: a long thin streak that crosses over several different objects/"
+    "surfaces and does NOT coincide with any real edge is a DEFECT (scratch).\n"
+    "Answer ONLY JSON: {\"label\":\"defect|scene\",\"confidence\":0-1,\"reason\":\"few words\"}"
+)
+
+# Le prompt "tache" garde des catégories de décor plus larges (peau, reflet,
+# détail d'objet) car les grosses taches compactes correspondent souvent à
+# ce genre d'éléments réels.
+_BLOB_PROMPT = (
     "Old scanned color photograph (1985). Two views of the SAME candidate region:\n"
     "- IMAGE 1: the whole photo; the region is painted magenta with a yellow arrow.\n"
     "- IMAGE 2: a high-resolution zoom; the region is outlined in magenta.\n"
-    "Decide if the marked region is damage on the photo, or a real part of the scene.\n"
-    "- \"defect\": physical damage ON the photo — scratch, scuff, crease, crack, "
-    "dust speck, hair, stain or blotch. It does NOT belong to the depicted scene.\n"
-    "- \"scene\": a real element of the photographed scene — skin, face, eye, hand, "
-    "button, jewelry, furniture/door/window edge, wallpaper pattern, cable, fabric "
-    "seam, highlight or reflection, etc.\n"
-    "Key tests:\n"
-    "- A thin streak crossing freely over several surfaces, not following any real "
-    "edge => defect (scratch).\n"
-    "- A spot/blob lying ON an object and matching its material/shape (skin, fabric, "
-    "object detail) => scene.\n"
-    "- An isolated spot/stain unrelated to any object, odd color or texture => defect.\n"
+    "This region is a compact spot/blob detected as a possible defect.\n"
+    "Decide if it is damage ON the photo (dust speck, hair, stain, blotch, scuff), "
+    "or a real part of the depicted scene (skin, face, eye, hand, button, jewelry, "
+    "fabric/object detail, wallpaper pattern, highlight or reflection).\n"
+    "- If the spot lies ON an object and matches its material, color and shape "
+    "=> scene.\n"
+    "- If it is an isolated spot/stain unrelated to any object, with an odd color "
+    "or texture not matching its surroundings => defect.\n"
     "Answer ONLY with JSON: "
     "{\"label\":\"defect\" or \"scene\",\"confidence\":0.0-1.0,\"reason\":\"few words\"}"
 )
@@ -299,13 +317,13 @@ class VLMRefiner:
                 last_err = exc
         raise last_err if last_err else RuntimeError("Aucune Auto-classe VLM disponible")
 
-    def _ask(self, global_rgb: np.ndarray, zoom_rgb: np.ndarray) -> str:
+    def _ask(self, global_rgb: np.ndarray, zoom_rgb: np.ndarray, prompt: str) -> str:
         from PIL import Image
         torch = self._torch
         msgs = [{"role": "user", "content": [
             {"type": "image", "image": Image.fromarray(global_rgb)},
             {"type": "image", "image": Image.fromarray(zoom_rgb)},
-            {"type": "text", "text": _PROMPT},
+            {"type": "text", "text": prompt},
         ]}]
         inp = self._proc.apply_chat_template(
             msgs, tokenize=True, add_generation_prompt=True,
@@ -341,7 +359,8 @@ class VLMRefiner:
                 on_progress(k, len(cands))
             g = _global_view(image_bgr, c.labels, lbl, c.cents[lbl])
             z = _zoom_view(image_bgr, c.labels, lbl, c.stats[lbl])
-            raw = self._ask(g, z)
+            prompt = _LINE_PROMPT if kind == "line" else _BLOB_PROMPT
+            raw = self._ask(g, z, prompt)
             data = _parse_json(raw)
             label = str(data.get("label", "?")).lower()
             conf = data.get("confidence")
@@ -373,8 +392,9 @@ class VLMRefiner:
                 else f"[{kind}] VLM : {verdict}{conf}"
             )
 
+        prompt = f"--- Lignes ---\n{_LINE_PROMPT}\n\n--- Taches ---\n{_BLOB_PROMPT}"
         return RefineResult(
-            model_id=model_id, prompt=_PROMPT, refined_mask=refined,
+            model_id=model_id, prompt=prompt, refined_mask=refined,
             review_labels=review_labels, review_categories=review_categories,
             review_reasons=review_reasons,
             exchanges=exchanges, n_components=c.n - 1,
