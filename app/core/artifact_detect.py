@@ -71,6 +71,12 @@ class ScratchDetector:
     def is_loaded(self) -> bool:
         return self._model is not None
 
+    def unload(self) -> None:
+        """Libère le modèle de détection de la mémoire."""
+        self._model = None
+        if self._torch.cuda.is_available():
+            self._torch.cuda.empty_cache()
+
     def _ensure_loaded(self) -> None:
         if self._model is not None:
             return

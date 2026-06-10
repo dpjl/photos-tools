@@ -88,6 +88,8 @@ class NavMixin:
         self._artifact_base_image = None
         self._artifact_spots = None
         self._artifact_spots_dev = -1.0
+        if hasattr(self, "_vlm_apply_btn"):
+            self._vlm_apply_btn.setEnabled(False)
 
         # ── Image originale ───────────────────────────────────────────────────
         img = cv2.imread(cfg.file_path, cv2.IMREAD_COLOR)

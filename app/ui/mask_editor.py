@@ -19,7 +19,7 @@ import numpy as np
 
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
-    QSlider, QSizePolicy, QWidget, QFrame,
+    QSlider, QSizePolicy, QWidget, QFrame, QScrollArea, QToolTip,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QRect
 from PyQt6.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QKeySequence, QShortcut
@@ -46,6 +46,11 @@ class MaskCanvas(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMinimumSize(400, 300)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        # Infobulle lisible (raison du VLM en mode revue) : texte clair sur fond sombre
+        self.setStyleSheet(
+            "QToolTip { color:#eaeaf2; background-color:#23232e;"
+            " border:1px solid #4a4a6a; padding:4px; font-size:11px; }"
+        )
 
         # Image en RGB pour QImage
         # _orig_img_rgb : image de reference
@@ -87,6 +92,14 @@ class MaskCanvas(QWidget):
         self._selected_mask: np.ndarray | None = None   # uint8, zone sélectionnée
         self._peek:          bool               = False  # masque l'overlay pour voir dessous
 
+        # Mode « revue VLM » : candidats colorés (violet=décor à retirer, vert=défaut gardé)
+        self._review_labels: np.ndarray | None = None   # int32, id de composante candidate
+        self._review_cats:   dict               = {}     # {id: "scene"|"defect"}
+        self._review_reasons: dict              = {}     # {id: texte (verdict + raison VLM)}
+        self._review_scene:  np.ndarray | None = None   # bool, pixels à retirer (violet)
+        self._review_defect: np.ndarray | None = None   # bool, pixels gardés (vert)
+        self._review_hover_lbl: int             = 0      # composante survolée (anti-clignotement)
+
         # Zoom / pan
         self._zoom:     float          = 1.0
         self._pan_x:    float          = 0.0
@@ -121,6 +134,7 @@ class MaskCanvas(QWidget):
         self._redo_stack.clear()
         self._selected_mask   = None
         self._peek            = False
+        self._clear_review_state()
         self._painting        = False
         self._erasing         = False
         self._last_canvas_pt  = None
@@ -151,6 +165,7 @@ class MaskCanvas(QWidget):
             self._push_undo()
         self._mask = mask.copy()
         self._selected_mask = None
+        self._clear_review_state()
         self._invalidate()
 
     def push_undo(self) -> None:
@@ -161,6 +176,7 @@ class MaskCanvas(QWidget):
         self._push_undo()
         self._mask[:] = 0
         self._selected_mask = None
+        self._clear_review_state()
         self._invalidate()
 
     def undo(self) -> None:
@@ -168,6 +184,7 @@ class MaskCanvas(QWidget):
             self._redo_stack.append(self._mask.copy())
             self._mask = self._undo_stack.pop()
             self._selected_mask = None
+            self._clear_review_state()
             self._invalidate()
 
     # ── Sélection / suppression d'une zone, peek ──────────────────────────────
@@ -210,11 +227,88 @@ class MaskCanvas(QWidget):
         self._peek = not self._peek
         self._invalidate()
 
+    # ── Mode revue VLM ────────────────────────────────────────────────────────
+
+    def in_review(self) -> bool:
+        return self._review_labels is not None
+
+    def _clear_review_state(self) -> None:
+        self._review_labels = None
+        self._review_cats = {}
+        self._review_reasons = {}
+        self._review_scene = None
+        self._review_defect = None
+        self._review_hover_lbl = 0
+
+    def _rebuild_review_masks(self) -> None:
+        """Recalcule les masques booléens violet/vert depuis les catégories."""
+        if self._review_labels is None:
+            return
+        scene = np.zeros(self._mask.shape, dtype=bool)
+        defect = np.zeros(self._mask.shape, dtype=bool)
+        for lbl, cat in self._review_cats.items():
+            comp = self._review_labels == lbl
+            if cat == "scene":
+                scene |= comp
+            else:
+                defect |= comp
+        self._review_scene, self._review_defect = scene, defect
+
+    def enter_review(self, labels: np.ndarray, categories: dict,
+                     reasons: dict | None = None) -> None:
+        """Entre en mode revue : colore les candidats (violet=décor, vert=défaut)."""
+        if labels.shape[:2] != self._mask.shape[:2]:
+            labels = cv2.resize(labels.astype(np.int32),
+                                (self._mask.shape[1], self._mask.shape[0]),
+                                interpolation=cv2.INTER_NEAREST)
+        self._review_labels = labels.astype(np.int32)
+        self._review_cats = dict(categories)
+        self._review_reasons = dict(reasons or {})
+        self._review_hover_lbl = 0
+        self._selected_mask = None
+        self._rebuild_review_masks()
+        self._invalidate()
+
+    def review_counts(self) -> tuple[int, int]:
+        """(nb décor, nb défaut) dans la revue courante."""
+        scene = sum(1 for v in self._review_cats.values() if v == "scene")
+        return scene, len(self._review_cats) - scene
+
+    def _toggle_review_at(self, ix: int, iy: int) -> bool:
+        """Bascule la catégorie de la composante candidate sous (ix, iy)."""
+        if self._review_labels is None:
+            return False
+        if not (0 <= iy < self._review_labels.shape[0] and 0 <= ix < self._review_labels.shape[1]):
+            return False
+        lbl = int(self._review_labels[iy, ix])
+        if lbl == 0:
+            return False
+        self._review_cats[lbl] = "defect" if self._review_cats.get(lbl) == "scene" else "scene"
+        self._rebuild_review_masks()
+        self._invalidate()
+        return True
+
+    def apply_review(self) -> int:
+        """Supprime du masque toutes les zones « décor » (violet) et quitte la revue.
+
+        Retourne le nombre de composantes retirées.
+        """
+        if self._review_labels is None:
+            return 0
+        n_scene = sum(1 for v in self._review_cats.values() if v == "scene")
+        self._push_undo()
+        if self._review_scene is not None:
+            self._mask[self._review_scene] = 0
+        self._clear_review_state()
+        self._invalidate()
+        return n_scene
+
     def redo(self) -> None:
         if self._redo_stack:
             self._undo_stack.append(self._mask.copy())
             self._mask = self._redo_stack.pop()
             self._selected_mask = None
+            self._clear_review_state()
             self._invalidate()
 
     def get_zoom_state(self) -> tuple:
@@ -347,6 +441,7 @@ class MaskCanvas(QWidget):
                 # Ctrl+clic gauche → peindre
                 self._push_undo()
                 self._selected_mask = None
+                self._clear_review_state()
                 self._painting = True
                 self._erasing  = False
                 self._last_canvas_pt = pos
@@ -354,6 +449,14 @@ class MaskCanvas(QWidget):
                 if coords:
                     cv2.circle(self._mask, coords, self._brush_px, 255, -1)
                     self._invalidate()
+            elif self.in_review():
+                # Mode revue : clic sur un candidat = on attend le double-clic
+                # (bascule de catégorie) ; ailleurs = déplacement.
+                coords = self._canvas_to_img(pos)
+                if not (coords and self._review_labels[coords[1], coords[0]] > 0):
+                    self._panning  = True
+                    self._pan_last = pos
+                    self.setCursor(Qt.CursorShape.ClosedHandCursor)
             else:
                 # Clic gauche : sélectionner la zone rouge sous le curseur,
                 # sinon déplacer (pan).
@@ -372,6 +475,7 @@ class MaskCanvas(QWidget):
                 # Ctrl+clic droit → effacer
                 self._push_undo()
                 self._selected_mask = None
+                self._clear_review_state()
                 self._erasing  = True
                 self._painting = False
                 self._last_canvas_pt = pos
@@ -395,7 +499,22 @@ class MaskCanvas(QWidget):
             self._paint_segment(self._last_canvas_pt, pos, self._erasing)
             self._last_canvas_pt = pos
         else:
+            if self.in_review():
+                self._update_review_tooltip(pos, event.globalPosition().toPoint())
             self.update()  # reafficher juste le curseur
+
+    def _update_review_tooltip(self, canvas_pt: QPoint, global_pt: QPoint) -> None:
+        """Affiche la raison du VLM en infobulle quand on survole un candidat."""
+        coords = self._canvas_to_img(canvas_pt)
+        lbl = int(self._review_labels[coords[1], coords[0]]) if coords else 0
+        if lbl == self._review_hover_lbl:
+            return                          # même composante : éviter le clignotement
+        self._review_hover_lbl = lbl
+        text = self._review_reasons.get(lbl) if lbl else None
+        if text:
+            QToolTip.showText(global_pt, text, self)
+        else:
+            QToolTip.hideText()
 
     def mouseReleaseEvent(self, event):
         if event.button() in (Qt.MouseButton.MiddleButton, Qt.MouseButton.LeftButton):
@@ -408,6 +527,19 @@ class MaskCanvas(QWidget):
             self._painting       = False
             self._erasing        = False
             self._last_canvas_pt = None
+
+    def mouseDoubleClickEvent(self, event):
+        """En mode revue : double-clic sur un candidat = bascule décor ↔ défaut."""
+        if self.in_review() and event.button() == Qt.MouseButton.LeftButton \
+                and not (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            coords = self._canvas_to_img(event.position().toPoint())
+            if coords and self._toggle_review_at(coords[0], coords[1]):
+                self._panning = False
+                self._pan_last = None
+                self.setCursor(Qt.CursorShape.ArrowCursor)
+                event.accept()
+                return
+        super().mouseDoubleClickEvent(event)
 
     def wheelEvent(self, event):
         delta = event.angleDelta().y()
@@ -460,8 +592,14 @@ class MaskCanvas(QWidget):
         ih, iw = self._mask.shape
         rgba = np.zeros((ih, iw, 4), dtype=np.uint8)
         if not self._peek:
-            rgba[self._mask > 127] = (255, 60, 60, 160)
-            if self._selected_mask is not None:
+            rgba[self._mask > 127] = (255, 60, 60, 160)          # masque (gardé) en rouge
+            if self._review_labels is not None:
+                # Revue VLM : violet = décor (à retirer), vert = défaut (gardé)
+                if self._review_defect is not None:
+                    rgba[self._review_defect] = (60, 210, 90, 180)
+                if self._review_scene is not None:
+                    rgba[self._review_scene] = (190, 60, 235, 190)
+            elif self._selected_mask is not None:
                 rgba[self._selected_mask > 0] = (255, 220, 40, 210)  # sélection en jaune
         data = np.ascontiguousarray(rgba)
         qimg = QImage(data.tobytes(), iw, ih, iw * 4, QImage.Format.Format_RGBA8888)
@@ -548,45 +686,39 @@ class MaskCanvasPanel(QWidget):
         self._canvas.brush_size_changed.connect(self._on_canvas_brush_changed)
         root.addWidget(self._canvas, stretch=1)
 
-        # ── Barre d'outils (droite, largeur fixe) ────────────────────────────
+        # ── Barre d'outils (droite, largeur fixe, défilable) ─────────────────
         sidebar = QWidget()
-        sidebar.setFixedWidth(sidebar_width)
         sidebar.setStyleSheet("background: #1a1a2e;")
         sl = QVBoxLayout(sidebar)
-        sl.setContentsMargins(12, 14, 12, 14)
-        sl.setSpacing(8)
+        sl.setContentsMargins(8, 10, 8, 10)
+        sl.setSpacing(5)
 
         title = QLabel("Masque de retouche")
-        title.setStyleSheet("color:#ddd; font-size:13px; font-weight:700;")
+        title.setStyleSheet("color:#ddd; font-size:12px; font-weight:700;")
         sl.addWidget(title)
         sl.addWidget(self._hline())
 
         tips = QLabel(
-            "Ctrl + clic gauche  → peindre\n"
-            "Ctrl + clic droit   → effacer\n"
-            "Clic gauche (zone)  → sélectionner\n"
-            "  V                 → voir dessous\n"
-            "  Suppr             → effacer la zone\n"
-            "Clic gauche (vide)  → déplacer\n"
-            "Molette             → taille pinceau\n"
-            "Ctrl+Molette        → zoom\n"
-            "Ctrl+Z / Ctrl+Y     → annuler/rétablir"
+            "Ctrl+clic G/D : peindre / effacer\n"
+            "Clic zone : sélectionner\n"
+            "   V : voir dessous · Suppr : efface\n"
+            "Clic vide : déplacer\n"
+            "Molette : taille · Ctrl+molette : zoom\n"
+            "Ctrl+Z / Y : annuler / rétablir"
         )
-        tips.setStyleSheet("color:#7a9ab0; font-size:10px; font-family:Consolas,monospace;")
+        tips.setStyleSheet("color:#7a9ab0; font-size:9px; font-family:Consolas,monospace;")
         sl.addWidget(tips)
         sl.addWidget(self._hline())
 
-        lbl_brush = QLabel("Taille du pinceau :")
-        lbl_brush.setStyleSheet("color:#bbb; font-size:11px;")
-        sl.addWidget(lbl_brush)
-
         size_row = QHBoxLayout()
-        self._brush_val_lbl = QLabel("30 px")
-        self._brush_val_lbl.setStyleSheet(
-            "color:#9de; font-size:13px; font-weight:700; min-width:55px;"
-        )
-        size_row.addWidget(self._brush_val_lbl)
+        size_row.setSpacing(4)
+        lbl_brush = QLabel("Pinceau")
+        lbl_brush.setStyleSheet("color:#bbb; font-size:10px;")
+        size_row.addWidget(lbl_brush)
         size_row.addStretch()
+        self._brush_val_lbl = QLabel("30 px")
+        self._brush_val_lbl.setStyleSheet("color:#9de; font-size:11px; font-weight:700;")
+        size_row.addWidget(self._brush_val_lbl)
         sl.addLayout(size_row)
 
         self._brush_slider = QSlider(Qt.Orientation.Horizontal)
@@ -597,15 +729,20 @@ class MaskCanvasPanel(QWidget):
 
         sl.addWidget(self._hline())
 
-        btn_clear = QPushButton("\U0001f5d1  Effacer tout le masque")
+        row_edit = QHBoxLayout()
+        row_edit.setSpacing(4)
+        btn_clear = QPushButton("\U0001f5d1 Effacer")
+        btn_clear.setToolTip("Effacer tout le masque")
         btn_clear.clicked.connect(self._canvas.clear_mask)
         self._style(btn_clear)
-        sl.addWidget(btn_clear)
+        row_edit.addWidget(btn_clear)
 
-        btn_undo = QPushButton("\u21a9  Annuler (Ctrl+Z)")
+        btn_undo = QPushButton("\u21a9 Annuler")
+        btn_undo.setToolTip("Annuler (Ctrl+Z)")
         btn_undo.clicked.connect(self._canvas.undo)
         self._style(btn_undo)
-        sl.addWidget(btn_undo)
+        row_edit.addWidget(btn_undo)
+        sl.addLayout(row_edit)
 
         self._sidebar_layout     = sl
         self._sidebar_insert_idx = sl.count()   # position avant le stretch
@@ -623,7 +760,19 @@ class MaskCanvasPanel(QWidget):
             self._style(btn_cancel)
             sl.addWidget(btn_cancel)
 
-        root.addWidget(sidebar)
+        # Sidebar d\u00e9filable (le panneau de contr\u00f4les peut \u00eatre haut)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFixedWidth(sidebar_width)
+        scroll.setWidget(sidebar)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet(
+            "QScrollArea { background:#1a1a2e; border:none; }"
+            "QScrollBar:vertical { background:#16162a; width:9px; margin:0; }"
+            "QScrollBar::handle:vertical { background:#33335a; border-radius:4px; min-height:30px; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }"
+        )
+        root.addWidget(scroll)
 
     # ── API publique ──────────────────────────────────────────────────────────
 
@@ -649,6 +798,21 @@ class MaskCanvasPanel(QWidget):
     def push_undo(self) -> None:
         """Empile l'état courant du masque dans l'historique."""
         self._canvas.push_undo()
+
+    # ── Revue VLM ──────────────────────────────────────────────────────────────
+
+    def enter_review(self, labels: np.ndarray, categories: dict,
+                     reasons: dict | None = None) -> None:
+        self._canvas.enter_review(labels, categories, reasons)
+
+    def apply_review(self) -> int:
+        return self._canvas.apply_review()
+
+    def in_review(self) -> bool:
+        return self._canvas.in_review()
+
+    def review_counts(self) -> tuple:
+        return self._canvas.review_counts()
 
     def add_to_sidebar(self, widget: "QWidget") -> None:
         """Insère un widget dans la sidebar juste avant le stretch final."""
@@ -677,13 +841,13 @@ class MaskCanvasPanel(QWidget):
         if accent:
             btn.setStyleSheet(
                 "QPushButton { background:#1e3a52; color:#b8e0f7; border-radius:4px;"
-                "  padding:6px 8px; font-size:11px; }"
+                "  padding:5px 6px; font-size:10px; }"
                 "QPushButton:hover { background:#2a5577; }"
             )
         else:
             btn.setStyleSheet(
                 "QPushButton { background:#1e1e38; color:#9ab; border-radius:4px;"
-                "  padding:6px 8px; font-size:11px; }"
+                "  padding:5px 6px; font-size:10px; }"
                 "QPushButton:hover { background:#2a2a50; color:#ccc; }"
             )
 

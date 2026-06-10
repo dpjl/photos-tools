@@ -10,6 +10,12 @@ APP_DIR  = os.path.dirname(os.path.abspath(__file__))
 # Répertoire parent contenant les modèles
 BASE_DIR = os.path.dirname(APP_DIR)
 
+# Cache HuggingFace (modèles VLM + token d'authentification) — placé sous models/
+# pour rester sur le grand disque et co-localiser le token et les poids.
+# Doit être défini AVANT tout import de transformers/huggingface_hub.
+HF_HOME_DIR = os.path.join(BASE_DIR, "models", "hf_cache")
+os.environ.setdefault("HF_HOME", HF_HOME_DIR)
+
 GFPGAN_MODEL_PATH        = os.path.join(BASE_DIR, "GFPGANv1.4.pth")
 SCUNET_MODELS_DIR        = os.path.join(BASE_DIR, "models")
 MEDIAPIPE_LANDMARKER_PATH = os.path.join(APP_DIR,  "face_landmarker.task")
