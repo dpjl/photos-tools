@@ -358,6 +358,38 @@ class VLMRefiner:
                 last_err = exc
         raise last_err if last_err else RuntimeError("Aucune Auto-classe VLM disponible")
 
+    def ask(
+        self,
+        images_rgb: "list[np.ndarray]",
+        prompt: str,
+        model_id: str = DEFAULT_MODEL,
+        max_new_tokens: int = 300,
+    ) -> str:
+        """Question libre au VLM sur une ou plusieurs images RGB.
+
+        API générique réutilisée hors raffinement de masques (ex. rédaction de
+        prompt couleur par l'étape genref). Charge le modèle si nécessaire.
+        """
+        from PIL import Image
+        self._ensure(model_id)
+        torch = self._torch
+        content: list = [
+            {"type": "image", "image": Image.fromarray(img)} for img in images_rgb
+        ]
+        content.append({"type": "text", "text": prompt})
+        msgs = [{"role": "user", "content": content}]
+        inp = self._proc.apply_chat_template(
+            msgs, tokenize=True, add_generation_prompt=True,
+            return_dict=True, return_tensors="pt",
+        ).to(self._device)
+        with torch.no_grad():
+            out = self._model.generate(
+                **inp, max_new_tokens=max_new_tokens, do_sample=False
+            )
+        return self._proc.decode(
+            out[0, inp["input_ids"].shape[1]:], skip_special_tokens=True
+        ).strip()
+
     def _ask(self, global_rgb: np.ndarray, zoom_rgb: np.ndarray, prompt: str) -> str:
         from PIL import Image
         torch = self._torch

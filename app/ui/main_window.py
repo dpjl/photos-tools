@@ -136,6 +136,7 @@ class MainApp(
         self._ctrl.mask_edit_requested.connect(self._on_mask_edit_requested)
         self._ctrl.crop_edit_requested.connect(self._on_crop_edit_requested)
         self._ctrl.color_picker_requested.connect(self._on_color_picker_requested)
+        self._ctrl.genref_requested.connect(self._on_genref_requested)
         splitter.addWidget(self._ctrl)
 
         # Zone d'affichage (droite)

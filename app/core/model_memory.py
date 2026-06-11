@@ -53,6 +53,7 @@ def unload_all_models(steps=None) -> list[str]:
         ("core.lama_inpaint", "LamaInpainter", "LaMa"),
         ("core.artifact_detect", "ScratchDetector", "détecteur rayures"),
         ("core.vlm_refine", "VLMRefiner", "VLM"),
+        ("core.genref", "GenRefEngine", "FLUX Kontext"),
     ):
         try:
             mod = __import__(import_path, fromlist=[cls_name])

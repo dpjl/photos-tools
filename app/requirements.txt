@@ -54,3 +54,12 @@ rembg>=2.0.50
 onnxruntime>=1.15.0
 # REMARQUE onnxruntime : utiliser la version standard (CPU), PAS onnxruntime-directml.
 # onnxruntime-directml installe protobuf 7.x et casse mediapipe.
+
+# Couleur par référence IA (étape genref) — VLM (rédaction du prompt) +
+# FLUX.1 Kontext 4-bit (génération de la référence, GPU NVIDIA requis).
+# IMPORTANT : installer diffusers avec --no-deps (toutes ses dépendances
+# sont déjà présentes ; une installation standard risquerait de bouger les
+# versions épinglées ci-dessus) :
+#   pip install --no-deps diffusers
+#   pip install bitsandbytes sentencepiece
+# transformers est déjà requis par le raffinement VLM (core/vlm_refine).

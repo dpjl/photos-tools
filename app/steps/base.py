@@ -37,6 +37,7 @@ class StepBase:
     has_mask_editor:   bool      = False  # True → bouton « Peindre le masque »
     has_crop_editor:   bool      = False  # True → bouton « Dessiner recadrage »
     has_color_picker:  bool      = False  # True → bouton « Sélectionner point blanc »
+    has_genref_dialog: bool      = False  # True → bouton « Générer la référence IA… »
     previewable:       bool      = False  # True → aperçu temps réel à chaque changement de param
     profile_param_key: str       = ""     # clé du param qui pilote les presets de profil
     param_presets:     dict      = {}     # {valeur: {param_key: val, ...}}

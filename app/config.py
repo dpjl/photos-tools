@@ -27,6 +27,11 @@ REALESRGAN_X4PLUS_PATH   = os.path.join(REALESRGAN_MODELS_DIR, "RealESRGAN_x4plu
 DDCOLOR_MODEL_REPO = "piddnad/ddcolor_modelscope"
 DDCOLOR_CACHE_DIR  = os.path.join(SCUNET_MODELS_DIR, "ddcolor_modelscope")
 
+# Couleur par référence IA (étape genref) — FLUX.1 Kontext quantifié 4-bit
+FLUX_KONTEXT_REPO = "eramth/flux-kontext-4bit-fp4"
+# Cache disque des références générées : une entrée par (image, style, graine)
+GENREF_CACHE_DIR  = os.path.join(SCUNET_MODELS_DIR, "genref_cache")
+
 # Détection automatique d'artefacts (rayures / plis) — Microsoft BOPBTL
 BOPBTL_DETECTION_DIR     = os.path.join(SCUNET_MODELS_DIR, "bopbtl_detection")
 BOPBTL_DETECTION_WEIGHTS = os.path.join(BOPBTL_DETECTION_DIR, "FT_Epoch_latest.pt")

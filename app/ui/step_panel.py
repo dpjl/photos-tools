@@ -103,6 +103,7 @@ class StepPanel(QWidget):
     mask_edit_requested     = pyqtSignal(str)               # step_id — ouvrir l'éditeur de masque
     crop_edit_requested     = pyqtSignal(str)               # step_id — ouvrir l'éditeur de crop
     color_picker_requested  = pyqtSignal(str)               # step_id — ouvrir la pipette WB
+    genref_requested        = pyqtSignal(str)               # step_id — ouvrir le générateur de référence IA
 
     def __init__(self, step, parent=None):
         super().__init__(parent)
@@ -301,6 +302,24 @@ class StepPanel(QWidget):
                 lambda: self.color_picker_requested.emit(self._step.id)
             )
             body_layout.addWidget(btn_wb)
+
+        # Bouton Générer la référence IA (seulement si has_genref_dialog=True)
+        if getattr(self._step, "has_genref_dialog", False):
+            sep_gr = QFrame()
+            sep_gr.setFrameShape(QFrame.Shape.HLine)
+            sep_gr.setStyleSheet("background: #2a2a3a; margin: 2px 0;")
+            sep_gr.setFixedHeight(1)
+            body_layout.addWidget(sep_gr)
+            btn_gr = QPushButton("✨  Générer la référence IA…")
+            btn_gr.setStyleSheet(
+                "QPushButton { background: #1e3a52; color: #b8e0f7; border-radius: 4px;"
+                "  padding: 5px 12px; font-size: 11px; }"
+                "QPushButton:hover { background: #2a5577; }"
+            )
+            btn_gr.clicked.connect(
+                lambda: self.genref_requested.emit(self._step.id)
+            )
+            body_layout.addWidget(btn_gr)
 
         # Bouton Recalculer + bouton Rétablir les défauts
         btn_row = QHBoxLayout()
@@ -510,6 +529,7 @@ class StepListWidget(QWidget):
     mask_edit_requested         = pyqtSignal(str)
     crop_edit_requested         = pyqtSignal(str)
     color_picker_requested      = pyqtSignal(str)
+    genref_requested            = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -548,6 +568,7 @@ class StepListWidget(QWidget):
             panel.mask_edit_requested.connect(self.mask_edit_requested)
             panel.crop_edit_requested.connect(self.crop_edit_requested)
             panel.color_picker_requested.connect(self.color_picker_requested)
+            panel.genref_requested.connect(self.genref_requested)
             self._panels[step.id] = panel
             self._order.append(step.id)
             self._vbox.insertWidget(len(self._order) - 1, panel)

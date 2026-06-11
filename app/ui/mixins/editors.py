@@ -89,6 +89,40 @@ class EditorsMixin:
                 step.clear_pick_point()
                 self._status_bar.showMessage(f"Sélection effacée pour « {step.name} ».")
 
+    @pyqtSlot(str)
+    def _on_genref_requested(self, step_id: str):
+        """Ouvre le générateur de référence IA pour l'étape step_id."""
+        from PyQt6.QtWidgets import QDialog
+        from ui.genref_dialog import GenRefDialog
+
+        step = self._steps_by_id.get(step_id)
+        if step is None:
+            return
+        img = self._get_step_input_image(step_id)
+        if img is None:
+            self._status_bar.showMessage(
+                "Ouvrez une image avant de générer une référence IA."
+            )
+            return
+        panel = self._ctrl.step_list.get_panel(step_id)
+        cur = panel.get_params() if panel is not None else step.default_params()
+        dlg = GenRefDialog(self, img,
+                           style=str(cur.get("style", "court")),
+                           seed=int(cur.get("graine", 42)))
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            # Aligner les params du panneau sur l'entrée choisie
+            if panel is not None:
+                panel.set_params({"style": dlg.current_style(),
+                                  "graine": dlg.current_seed()})
+            self._status_bar.showMessage(
+                f"Référence IA prête ({dlg.current_style()} / graine "
+                f"{dlg.current_seed()}) — « {step.name} »."
+            )
+            self._mark_stale_from(step_id)
+            self._update_result_diff_indicator()
+            if hasattr(self, "_schedule_preview"):
+                self._schedule_preview(step_id)
+
     def _get_step_input_image(self, step_id: str) -> np.ndarray | None:
         """Retourne l'image en entrée de l'étape step_id (sortie de la précédente)."""
         order = self._ctrl.step_list.get_order()

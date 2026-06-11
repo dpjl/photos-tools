@@ -27,6 +27,7 @@ class ControlPanel(QWidget):
     mask_edit_requested         = pyqtSignal(str)
     crop_edit_requested         = pyqtSignal(str)
     color_picker_requested      = pyqtSignal(str)
+    genref_requested            = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -98,6 +99,7 @@ class ControlPanel(QWidget):
         self.step_list.mask_edit_requested.connect(self.mask_edit_requested)
         self.step_list.crop_edit_requested.connect(self.crop_edit_requested)
         self.step_list.color_picker_requested.connect(self.color_picker_requested)
+        self.step_list.genref_requested.connect(self.genref_requested)
 
         scroll.setWidget(self.step_list)
         root.addWidget(scroll, stretch=1)
