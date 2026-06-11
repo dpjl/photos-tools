@@ -333,7 +333,14 @@ def remove_red_cast(
 
         expected = cv2.resize(expected_s, (w, h), interpolation=cv2.INTER_LINEAR)
         actual   = cv2.resize(actual_s, (w, h), interpolation=cv2.INTER_LINEAR)
-        out[:, :, c] = lab[:, :, c] - soft * (actual - expected) * s
+        out[:, :, c] = lab[:, :, c] - (actual - expected) * s
 
     out = np.clip(out, 0, 255).astype(np.uint8)
-    return cv2.cvtColor(out, cv2.COLOR_LAB2BGR)
+    out_bgr = cv2.cvtColor(out, cv2.COLOR_LAB2BGR)
+
+    # Fondu appliqué en BGR contre l'original : les pixels hors masque restent
+    # STRICTEMENT identiques (pas d'aller-retour LAB↔BGR qui décale de ±1).
+    soft3 = soft[:, :, None]
+    result = (image_bgr.astype(np.float32) * (1.0 - soft3)
+              + out_bgr.astype(np.float32) * soft3)
+    return np.clip(result, 0, 255).astype(np.uint8)

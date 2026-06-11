@@ -430,19 +430,55 @@ def load_export_recipe(path: str) -> Optional[dict]:
         return None
 
 
+def _merge_step_order(saved: list[str], canonical: list[str]) -> list[str]:
+    """Complète un ordre d'étapes sauvegardé avec les étapes ajoutées depuis.
+
+    Chaque étape de ``canonical`` absente de ``saved`` est insérée juste après
+    la dernière étape canonique qui la précède et qui est présente — elle
+    retrouve ainsi sa position par défaut dans le pipeline (et pas en fin de
+    liste, où elle s'exécuterait après recadrage/upscale).
+    """
+    order = list(saved)
+    for idx, sid in enumerate(canonical):
+        if sid in order:
+            continue
+        preceding = [p for p in canonical[:idx] if p in order]
+        pos = order.index(preceding[-1]) + 1 if preceding else 0
+        order.insert(pos, sid)
+    return order
+
+
 def _apply_recipe(config: "BatchImageConfig", recipe: dict) -> None:
-    """Applique un recipe chargé à une BatchImageConfig."""
+    """Applique un recipe chargé à une BatchImageConfig.
+
+    Les étapes absentes du recipe (ajoutées à l'application après la
+    sauvegarde) sont remises à leur état par défaut : insérées à leur
+    position canonique dans l'ordre, désactivées si tel est leur défaut,
+    paramètres par défaut. Sans cela, un recipe antérieur à une étape
+    l'exclurait du pipeline (preview/run) ou, à l'inverse, une restauration
+    conserverait l'état coché courant d'une étape inconnue du résultat.
+    """
+    from steps import ALL_STEPS
+    canonical = [s.id for s in ALL_STEPS]
+    defaults_enabled = {s.id: s.enabled_by_default for s in ALL_STEPS}
+    defaults_params = {s.id: s.default_params() for s in ALL_STEPS}
+
     if "step_order" in recipe:
-        config.step_order = list(recipe["step_order"])
+        config.step_order = _merge_step_order(
+            list(recipe["step_order"]), canonical
+        )
     if "step_enabled" in recipe:
-        # Fusionner plutôt que remplacer : les steps absents du recipe (ajoutés
-        # après la sauvegarde) conservent leur valeur enabled_by_default issue
-        # de make_config.
-        config.step_enabled.update(recipe["step_enabled"])
+        saved_enabled = recipe["step_enabled"]
+        for sid in canonical:
+            if sid not in saved_enabled:
+                config.step_enabled[sid] = defaults_enabled[sid]
+        config.step_enabled.update(saved_enabled)
     if "step_params" in recipe:
-        # Même logique : fusionner pour conserver les params par défaut des
-        # nouveaux steps.
-        for k, v in recipe["step_params"].items():
+        saved_params = recipe["step_params"]
+        for sid in canonical:
+            if sid not in saved_params:
+                config.step_params[sid] = dict(defaults_params[sid])
+        for k, v in saved_params.items():
             config.step_params[k] = dict(v)
     if "crop_rect" in recipe:
         rect = recipe.get("crop_rect")
