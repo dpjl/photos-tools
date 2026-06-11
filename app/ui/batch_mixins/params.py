@@ -11,7 +11,7 @@ from ui.param_history import (
     PropagateEnabledCommand, MoveStepCommand, ToggleStepCommand,
 )
 from ui.batch_window_constants import (
-    _FAST_PREVIEW_IDS, _TAB_MASK, _TAB_WB, _TAB_REDEYE, _TAB_CROP,
+    _FAST_PREVIEW_IDS, _TAB_MASK, _TAB_REDZONE, _TAB_WB, _TAB_REDEYE, _TAB_CROP,
 )
 
 
@@ -265,6 +265,8 @@ class ParamsMixin:
         idx = self._tabs.currentIndex()
         if idx == _TAB_MASK:
             self._mask_panel._canvas.undo()
+        elif idx == _TAB_REDZONE:
+            self._redzone_panel._canvas.undo()
         elif idx == _TAB_WB:
             self._wb_panel._canvas.undo()
             if self._current_cfg:
@@ -280,6 +282,8 @@ class ParamsMixin:
         idx = self._tabs.currentIndex()
         if idx == _TAB_MASK:
             self._mask_panel._canvas.redo()
+        elif idx == _TAB_REDZONE:
+            self._redzone_panel._canvas.redo()
         elif idx == _TAB_WB:
             self._wb_panel._canvas.redo()
             if self._current_cfg:
@@ -294,7 +298,10 @@ class ParamsMixin:
 
     @pyqtSlot(str)
     def _on_mask_edit_requested(self, step_id: str) -> None:
-        self._tabs.setCurrentIndex(_TAB_MASK)
+        """Ouvre l'onglet d'édition du masque propre à l'étape."""
+        self._tabs.setCurrentIndex(
+            _TAB_REDZONE if step_id == "redzone" else _TAB_MASK
+        )
 
     @pyqtSlot(str)
     def _on_crop_edit_requested(self, step_id: str) -> None:

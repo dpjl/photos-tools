@@ -82,7 +82,7 @@ class NavMixin:
         self._preview_full_img = None
         self._last_fast_preview = None
 
-        # Invalider le cache de détection d'artefacts (lié à l'image précédente)
+        # Invalider les caches de détection (liés à l'image précédente)
         self._artifact_probs = None
         self._artifact_base_mask = None
         self._artifact_base_image = None
@@ -90,6 +90,7 @@ class NavMixin:
         self._artifact_spots_dev = -1.0
         if hasattr(self, "_vlm_apply_btn"):
             self._vlm_apply_btn.setEnabled(False)
+        self._invalidate_redzone_cache()
 
         # ── Image originale ───────────────────────────────────────────────────
         img = cv2.imread(cfg.file_path, cv2.IMREAD_COLOR)
@@ -111,6 +112,7 @@ class NavMixin:
             result = self._get_result_from_disk(cfg)
             display = result if result is not None else img
             self._mask_panel.set_image(display, cfg.inpaint_mask)
+            self._redzone_panel.set_image(display, cfg.redzone_mask)
             self._wb_panel.set_image(display, cfg.wb_pick, cfg.wb_patch_radius)
             self._redeye_panel.set_image(img, cfg.redeye_mask)
             self._crop_panel.set_image(img, cfg.crop_rect)
@@ -189,6 +191,8 @@ class NavMixin:
         cfg.inpaint_mask = raw_mask if (raw_mask is not None and raw_mask.any()) else None
         raw_redeye = self._redeye_panel.get_mask()
         cfg.redeye_mask = raw_redeye if (raw_redeye is not None and raw_redeye.any()) else None
+        raw_redzone = self._redzone_panel.get_mask()
+        cfg.redzone_mask = raw_redzone if (raw_redzone is not None and raw_redzone.any()) else None
         cfg.crop_rect = self._crop_panel.get_crop_rect()
         cfg.wb_pick = self._wb_panel.get_pick_point()
         cfg.wb_patch_radius = self._wb_panel.get_patch_radius()
@@ -217,6 +221,13 @@ class NavMixin:
             else:
                 redeye_step.clear_redeye_mask()
 
+        redzone_step = self._steps_by_id.get("redzone")
+        if redzone_step and hasattr(redzone_step, "set_mask"):
+            if cfg.redzone_mask is not None:
+                redzone_step.set_mask(cfg.redzone_mask)
+            else:
+                redzone_step.clear_mask()
+
         wb_step = self._steps_by_id.get("wb")
         if wb_step and hasattr(wb_step, "set_pick_point"):
             if cfg.wb_pick is not None:
@@ -236,6 +247,9 @@ class NavMixin:
         redeye_step = self._steps_by_id.get("redeye")
         if redeye_step and hasattr(redeye_step, "clear_redeye_mask"):
             redeye_step.clear_redeye_mask()
+        redzone_step = self._steps_by_id.get("redzone")
+        if redzone_step and hasattr(redzone_step, "clear_mask"):
+            redzone_step.clear_mask()
         wb_step = self._steps_by_id.get("wb")
         if wb_step and hasattr(wb_step, "clear_pick_point"):
             wb_step.clear_pick_point()

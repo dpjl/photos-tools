@@ -58,6 +58,7 @@ class MaskCanvasPanel(QWidget):
         parent=None,
         show_ok_cancel: bool = False,
         sidebar_width:  int  = 215,
+        title:          str  = "Masque de retouche",
     ) -> None:
         super().__init__(parent)
 
@@ -77,9 +78,9 @@ class MaskCanvasPanel(QWidget):
         sl.setContentsMargins(8, 10, 8, 10)
         sl.setSpacing(5)
 
-        title = QLabel("Masque de retouche")
-        title.setStyleSheet("color:#ddd; font-size:12px; font-weight:700;")
-        sl.addWidget(title)
+        title_lbl = QLabel(title)
+        title_lbl.setStyleSheet("color:#ddd; font-size:12px; font-weight:700;")
+        sl.addWidget(title_lbl)
         sl.addWidget(self._hline())
 
         tips = QLabel(

@@ -12,6 +12,7 @@ from steps.step_gfpgan         import GFPGANStep
 from steps.step_scunet         import SCUNetStep
 from steps.step_rembg          import RembgStep
 from steps.step_lightleak      import LightLeakStep
+from steps.step_redzone        import RedZoneStep
 from steps.step_upscale        import UpscaleStep
 
 # Instances singleton — partagées dans toute l'application
@@ -27,6 +28,7 @@ ALL_STEPS = [
     SCUNetStep(),          # Embellissement SCUNet          — activée par défaut
     LightLeakStep(),       # Lumière parasite               — désactivée par défaut
     RembgStep(),           # Cast argentique                — désactivée par défaut
+    RedZoneStep(),         # Zones rouges (cast localisé)   — désactivée par défaut
     CropStep(),            # Recadrage manuel               — désactivée par défaut
     UpscaleStep(),         # Upscale IA                     — désactivée par défaut
 ]
@@ -35,5 +37,5 @@ __all__ = [
     "ALL_STEPS",
     "ColorStep", "AutoColorStep", "DDColorLUTStep", "CropStep", "FaceHighlightStep",
     "LightLeakStep", "RedEyeStep", "GFPGANStep", "SCUNetStep", "RembgStep",
-    "UpscaleStep",
+    "RedZoneStep", "UpscaleStep",
 ]

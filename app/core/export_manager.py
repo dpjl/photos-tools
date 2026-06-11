@@ -28,8 +28,9 @@ class ExportEntry:
     index:            int
     image_path:       str
     recipe_path:      str
-    mask_path:        Optional[str]       = None
-    redeye_mask_path: Optional[str]       = None
+    mask_path:         Optional[str]      = None
+    redeye_mask_path:  Optional[str]      = None
+    redzone_mask_path: Optional[str]      = None
     exported_at:      Optional[str]       = None  # ISO 8601
     recipe_data:      Optional[dict]      = field(default=None, repr=False)
 
@@ -59,6 +60,10 @@ def _redeye_mask_name(stem: str, index: int) -> str:
     return f"{_export_stem(stem, index)}.redeye_mask.png"
 
 
+def _redzone_mask_name(stem: str, index: int) -> str:
+    return f"{_export_stem(stem, index)}.redzone_mask.png"
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Service
 # ══════════════════════════════════════════════════════════════════════════════
@@ -71,6 +76,7 @@ class ExportManager:
         photo.export.001.recipe.json
         photo.export.001.mask.png
         photo.export.001.redeye_mask.png
+        photo.export.001.redzone_mask.png
     """
 
     def __init__(self, output_dir: str) -> None:
@@ -131,6 +137,10 @@ class ExportManager:
             redeye_p = os.path.join(self.output_dir, _redeye_mask_name(stem, n))
             if os.path.exists(redeye_p):
                 entry.redeye_mask_path = redeye_p
+
+            redzone_p = os.path.join(self.output_dir, _redzone_mask_name(stem, n))
+            if os.path.exists(redzone_p):
+                entry.redzone_mask_path = redzone_p
 
             if os.path.exists(entry.recipe_path):
                 try:
@@ -236,7 +246,8 @@ class ExportManager:
         ext  : extension du fichier source (ex: ``.tiff``)
         image : image résultat (BGR uint8)
         recipe : dictionnaire de paramètres de la recette
-        masks : ``{"mask": ndarray|None, "redeye_mask": ndarray|None}``
+        masks : ``{"mask": ..., "redeye_mask": ..., "redzone_mask": ...}``
+            (ndarray ou None pour chaque masque)
 
         Returns
         -------
@@ -254,6 +265,7 @@ class ExportManager:
         # ── Masques ───────────────────────────────────────────────────────
         has_mask = _mask_has_pixels(masks.get("mask"))
         has_redeye = _mask_has_pixels(masks.get("redeye_mask"))
+        has_redzone = _mask_has_pixels(masks.get("redzone_mask"))
 
         mask_path = None
         if has_mask:
@@ -267,6 +279,13 @@ class ExportManager:
             )
             cv2.imwrite(redeye_path, masks["redeye_mask"])
 
+        redzone_path = None
+        if has_redzone:
+            redzone_path = os.path.join(
+                self.output_dir, _redzone_mask_name(stem, idx)
+            )
+            cv2.imwrite(redzone_path, masks["redzone_mask"])
+
         # ── Recipe ────────────────────────────────────────────────────────
         recipe_out = dict(recipe)
         recipe_out["version"] = 2
@@ -274,6 +293,7 @@ class ExportManager:
         recipe_out["export_index"] = idx
         recipe_out["has_mask"] = has_mask
         recipe_out["has_redeye_mask"] = has_redeye
+        recipe_out["has_redzone_mask"] = has_redzone
 
         recipe_path = os.path.join(self.output_dir, _recipe_name(stem, idx))
         with open(recipe_path, "w", encoding="utf-8") as f:
@@ -285,6 +305,7 @@ class ExportManager:
             recipe_path=recipe_path,
             mask_path=mask_path,
             redeye_mask_path=redeye_path,
+            redzone_mask_path=redzone_path,
             exported_at=recipe_out["exported_at"],
             recipe_data=recipe_out,
         )
@@ -298,6 +319,7 @@ class ExportManager:
             entry.recipe_path,
             entry.mask_path,
             entry.redeye_mask_path,
+            entry.redzone_mask_path,
         ):
             if path and os.path.exists(path):
                 os.remove(path)
@@ -336,6 +358,12 @@ class ExportManager:
         if not entry.redeye_mask_path or not os.path.exists(entry.redeye_mask_path):
             return None
         return cv2.imread(entry.redeye_mask_path, cv2.IMREAD_GRAYSCALE)
+
+    def load_redzone_mask(self, entry: ExportEntry) -> Optional[np.ndarray]:
+        """Charge le masque zones rouges de l'export."""
+        if not entry.redzone_mask_path or not os.path.exists(entry.redzone_mask_path):
+            return None
+        return cv2.imread(entry.redzone_mask_path, cv2.IMREAD_GRAYSCALE)
 
     # ── Sélection du meilleur export ──────────────────────────────────────────
 

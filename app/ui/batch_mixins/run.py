@@ -169,6 +169,7 @@ class RunMixin:
         if result_img is not None:
             if cfg is self._current_cfg:
                 self._mask_panel._canvas.set_display_image(result_img)
+                self._redzone_panel._canvas.set_display_image(result_img)
                 self._wb_panel._canvas.set_display_image(result_img)
                 self._redeye_panel._canvas.set_display_image(result_img)
 

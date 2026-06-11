@@ -5,9 +5,9 @@ Layout ::
     ┌── Toolbar: [Sortie: /...][Parcourir][▶ Lancer la sélection][⚡ Lancer le batch] ─────────────────────────────┐
     ├────────── BatchThumbnailStrip ──────────────────────────────────────────────┤
     │ StepListWidget  │       ImageView (SyncedImageView)     │  QTabWidget      │
-    │ (≈260 px)       │                                       │  [Masque][Blanc] │
-    │                 │            (expanding)                │  MaskCanvasPanel │
-    │                 │                                       │  WBPickerPanel   │
+    │ (≈260 px)       │                                       │  [Masque][Zones  │
+    │                 │            (expanding)                │  rouges][Blanc]… │
+    │                 │                                       │  MaskCanvasPanel │
     └─────────────────┴───────────────────────────────────────┴──────────────────┘
 
 Chaque image possède sa propre configuration (step_order, params, masque, WB).
@@ -52,7 +52,7 @@ from ui.export_detail_panel import ExportDetailPanel
 from ui.notifications import NotificationManager, Level
 from ui.batch_window_constants import (
     _FAST_PREVIEW_IDS, _PREVIEW_TABS,
-    _TAB_PREVIEW, _TAB_MASK, _TAB_WB, _TAB_REDEYE,
+    _TAB_PREVIEW, _TAB_MASK, _TAB_REDZONE, _TAB_WB, _TAB_REDEYE,
     _TAB_CROP, _TAB_ORIGIN, _TAB_RESULT,
 )
 from core.export_manager import ExportManager, ExportEntry
@@ -63,6 +63,7 @@ from ui.batch_mixins.preview import PreviewMixin
 from ui.batch_mixins.run import RunMixin
 from ui.batch_mixins.exports import ExportsMixin
 from ui.batch_mixins.artifacts import ArtifactsMixin
+from ui.batch_mixins.redzones import RedZonesMixin
 from ui.batch_mixins.vlm import VlmMixin
 
 
@@ -73,6 +74,7 @@ class BatchWindow(
     ParamsMixin,
     NavMixin,
     ArtifactsMixin,
+    RedZonesMixin,
     VlmMixin,
     QMainWindow,
 ):
@@ -456,6 +458,38 @@ class BatchWindow(
         self._artifact_spots: Optional[np.ndarray] = None       # cache points colorés
         self._artifact_spots_dev: float = -1.0                  # sensibilité du cache
         self._artifact_pending_report: bool = False             # afficher le bilan après inférence
+
+        # ── Onglet Zones rouges : panneau + détection + VLM ──────────────────
+        self._redzone_panel = MaskCanvasPanel(_dummy, None, show_ok_cancel=False,
+                                              sidebar_width=_SIDEBAR_W,
+                                              title="Masque des zones rouges")
+        self._redzone_auto_btn = QPushButton("🔍  Détecter les zones rouges")
+        self._redzone_auto_btn.setToolTip(
+            "Détecte les voiles rosés/magenta résiduels (détérioration\n"
+            "argentique) en comparant chaque pixel du fond au chroma normal\n"
+            "des surfaces de même luminosité, puis ajoute les zones\n"
+            "correspondantes au masque."
+        )
+        self._redzone_auto_btn.setStyleSheet(
+            "QPushButton { background:#1e2a1e; color:#6e8; border:1px solid #3a5a3a;"
+            "  border-radius:4px; padding:5px 6px; font-size:10px; }"
+            "QPushButton:hover { background:#2a3a2a; color:#aea; }"
+            "QPushButton:disabled { color:#445; border-color:#223; }"
+        )
+        self._redzone_auto_btn.clicked.connect(self._redzone_auto_detect)
+        self._redzone_panel.add_to_sidebar(self._redzone_auto_btn)
+        self._redzone_panel.add_to_sidebar(self._build_redzone_controls())
+        self._redzone_panel.add_to_sidebar(self._build_redzone_vlm_controls())
+
+        # État de la détection de zones rouges (cache pour le réglage live)
+        self._redzone_worker: Optional[QThread] = None
+        self._redzone_analysis = None                            # RedZoneAnalysis
+        self._redzone_base_mask: Optional[np.ndarray] = None     # masque avant auto
+        self._redzone_base_image: Optional[np.ndarray] = None    # image analysée (BGR)
+        self._redzone_pending_report: bool = False
+        self._redzone_vlm_worker: Optional[QThread] = None
+        self._redzone_vlm_last_result = None
+
         self._wb_panel   = WBPickerPanel(
             _dummy, None, show_ok_cancel=False, sidebar_width=_SIDEBAR_W
         )
@@ -534,6 +568,7 @@ class BatchWindow(
 
         self._tabs.addTab(preview_wrapper,                                "Preview")       # _TAB_PREVIEW
         self._tabs.addTab(self._mask_panel,                               "Masque")        # _TAB_MASK
+        self._tabs.addTab(self._redzone_panel,                            "Zones rouges")  # _TAB_REDZONE
         self._tabs.addTab(self._wb_panel,                                 "Blanc")         # _TAB_WB
         self._tabs.addTab(self._redeye_panel,                             "Yeux rouges")   # _TAB_REDEYE
         self._tabs.addTab(self._crop_panel,                               "Recadrage")     # _TAB_CROP
@@ -739,6 +774,9 @@ class BatchWindow(
         redeye = mgr.load_redeye_mask(entry)
         if redeye is not None:
             data["_redeye_mask"] = redeye
+        redzone = mgr.load_redzone_mask(entry)
+        if redzone is not None:
+            data["_redzone_mask"] = redzone
         _apply_recipe(cfg, data)
         # Rafraîchir l'UI
         self._applying_order = True
@@ -768,14 +806,16 @@ class BatchWindow(
             result  = self._get_result_from_disk(cfg)
             display = result if result is not None else self._current_orig
             self._mask_panel.set_image(display, cfg.inpaint_mask)
+            self._redzone_panel.set_image(display, cfg.redzone_mask)
             self._redeye_panel.set_image(self._current_orig, cfg.redeye_mask)
             self._crop_panel.set_image(self._current_orig, cfg.crop_rect)
-            # Le cache de détection d'artefacts est lié à l'image précédente
+            # Les caches de détection sont liés à l'image précédente
             self._artifact_probs = None
             self._artifact_base_mask = None
             self._artifact_base_image = None
             self._artifact_spots = None
             self._artifact_spots_dev = -1.0
+            self._invalidate_redzone_cache()
         self._update_result_diff_indicator()
         self._statusbar.showMessage("Configuration restaurée depuis l'export.")
         self._schedule_preview_update()

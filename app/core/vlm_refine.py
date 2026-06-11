@@ -73,6 +73,26 @@ _LINE_PROMPT = (
     "Answer ONLY JSON: {\"label\":\"defect|scene\",\"confidence\":0-1,\"reason\":\"few words\"}"
 )
 
+# Prompt « zones rouges » : distingue un voile rosé/magenta de détérioration
+# (cast résiduel) de la couleur naturelle d'un objet chaud (bois, terre cuite,
+# tissu rouge, peau). Validé sur les photos d'étude 1985-0042/0043
+# (cf. do-not-commit/red-zones-study).
+_CAST_PROMPT = (
+    "Old scanned color photograph (1985) being restored. Two views of the SAME "
+    "candidate region:\n"
+    "- IMAGE 1: the whole photo; the region is outlined in magenta with a yellow arrow.\n"
+    "- IMAGE 2: a high-resolution zoom; the region is outlined in magenta.\n"
+    "This region looks reddish/pink/magenta. Decide whether this color is:\n"
+    "- \"cast\": an abnormal pink/red/magenta color stain or light-leak residue caused by "
+    "film/photo deterioration, which should be neutral (grey/white/blue/etc.) like the rest "
+    "of the same object or surface, OR\n"
+    "- \"natural\": the genuine natural color of the depicted material (e.g. terracotta tile "
+    "floor, wood, skin, reddish fabric, warm light reflection consistent with the scene).\n"
+    "Compare the region to the SAME object/surface elsewhere in IMAGE 1: if elsewhere it is a "
+    "different (e.g. neutral grey/blue) color than here, this is a \"cast\".\n"
+    "Answer ONLY JSON: {\"label\":\"cast|natural\",\"confidence\":0-1,\"reason\":\"few words\"}"
+)
+
 # Le prompt "tache" garde des catégories de décor plus larges (peau, reflet,
 # détail d'objet) car les grosses taches compactes correspondent souvent à
 # ce genre d'éléments réels.
@@ -201,7 +221,28 @@ def _global_view(bgr, labels, lbl, centroid) -> np.ndarray:
     return cv2.cvtColor(g, cv2.COLOR_BGR2RGB)
 
 
-def _zoom_view(bgr, labels, lbl, stat) -> np.ndarray:
+def _global_view_outline(bgr, labels, lbl, centroid,
+                         color=(255, 0, 255)) -> np.ndarray:
+    """Vue globale avec la zone détourée (couleurs réelles visibles).
+
+    Contrairement à :func:`_global_view` (zone peinte), le contenu de la zone
+    reste visible : indispensable quand le VLM doit juger sa COULEUR.
+    """
+    h, w = bgr.shape[:2]
+    g = bgr.copy()
+    comp = (labels == lbl).astype(np.uint8)
+    cnts, _ = cv2.findContours(comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cv2.drawContours(g, cnts, -1, color, 3)
+    cx, cy = int(centroid[0]), int(centroid[1])
+    cv2.arrowedLine(g, (min(w - 1, cx + 60), max(0, cy - 60)), (cx, cy),
+                    (0, 255, 255), 3, tipLength=0.3)
+    s = 1000 / max(h, w)
+    if s < 1:
+        g = cv2.resize(g, (int(w * s), int(h * s)))
+    return cv2.cvtColor(g, cv2.COLOR_BGR2RGB)
+
+
+def _zoom_view(bgr, labels, lbl, stat, color=(255, 0, 255)) -> np.ndarray:
     h, w = bgr.shape[:2]
     x, y, bw, bh = int(stat[0]), int(stat[1]), int(stat[2]), int(stat[3])
     pad = max(70, int(0.6 * max(bw, bh)))
@@ -210,7 +251,7 @@ def _zoom_view(bgr, labels, lbl, stat) -> np.ndarray:
     crop = bgr[y1:y2, x1:x2].copy()
     comp = (labels[y1:y2, x1:x2] == lbl).astype(np.uint8)
     cnts, _ = cv2.findContours(comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cv2.drawContours(crop, cnts, -1, (255, 0, 255), 1)
+    cv2.drawContours(crop, cnts, -1, color, 1)
     s = 900 / max(crop.shape[:2])
     if s > 1:
         crop = cv2.resize(crop, None, fx=s, fy=s, interpolation=cv2.INTER_CUBIC)
@@ -395,6 +436,79 @@ class VLMRefiner:
         prompt = f"--- Lignes ---\n{_LINE_PROMPT}\n\n--- Taches ---\n{_BLOB_PROMPT}"
         return RefineResult(
             model_id=model_id, prompt=prompt, refined_mask=refined,
+            review_labels=review_labels, review_categories=review_categories,
+            review_reasons=review_reasons,
+            exchanges=exchanges, n_components=c.n - 1,
+            removed=sum(e.removed for e in exchanges), elapsed=time.time() - t0,
+        )
+
+    def refine_redzones(
+        self,
+        image_bgr: np.ndarray,
+        mask: np.ndarray,
+        model_id: str = DEFAULT_MODEL,
+        on_progress=None,
+    ) -> RefineResult:
+        """Classe chaque zone rouge : cast résiduel (gardé) ou couleur naturelle.
+
+        Toutes les composantes du masque sont soumises au VLM (la détection
+        des zones rouges ne produit que de grandes zones, toutes ambiguës a
+        priori : un voile magenta et un sol en terre cuite ont le même chroma).
+        Le résultat réutilise la mécanique de revue des artefacts :
+        « defect » = cast (vert, gardé), « scene » = naturel (violet, retiré).
+        """
+        t0 = time.time()
+        if mask.shape[:2] != image_bgr.shape[:2]:
+            image_bgr = cv2.resize(image_bgr, (mask.shape[1], mask.shape[0]))
+
+        c = _connected(mask)
+        cands = sorted(range(1, c.n),
+                       key=lambda i: -int(c.stats[i, cv2.CC_STAT_AREA]))
+        self._ensure(model_id)
+
+        refined = mask.copy()
+        exchanges: list[CandidateExchange] = []
+        for k, lbl in enumerate(cands):
+            if on_progress is not None:
+                on_progress(k, len(cands))
+            # Zone détourée (pas peinte) : le VLM doit voir sa vraie couleur.
+            g = _global_view_outline(image_bgr, c.labels, lbl, c.cents[lbl])
+            z = _zoom_view(image_bgr, c.labels, lbl, c.stats[lbl])
+            raw = self._ask(g, z, _CAST_PROMPT)
+            data = _parse_json(raw)
+            label = str(data.get("label", "?")).lower()
+            conf = data.get("confidence")
+            removed = (label == "natural")
+            if removed:
+                refined[c.labels == lbl] = 0
+            w = int(c.stats[lbl, cv2.CC_STAT_WIDTH])
+            h = int(c.stats[lbl, cv2.CC_STAT_HEIGHT])
+            exchanges.append(CandidateExchange(
+                comp_id=int(lbl), kind="cast", length=max(w, h),
+                thickness=min(w, h), global_rgb=g, zoom_rgb=z, raw=raw,
+                label=label,
+                confidence=float(conf) if isinstance(conf, (int, float)) else None,
+                reason=str(data.get("reason", "")), removed=removed,
+            ))
+        if on_progress is not None:
+            on_progress(len(cands), len(cands))
+
+        review_labels = np.zeros(mask.shape[:2], dtype=np.int32)
+        review_categories: dict[int, str] = {}
+        review_reasons: dict[int, str] = {}
+        for e in exchanges:
+            review_labels[c.labels == e.comp_id] = e.comp_id
+            review_categories[e.comp_id] = "scene" if e.removed else "defect"
+            verdict = {"natural": "couleur naturelle", "cast": "cast résiduel"}.get(
+                e.label, "?")
+            conf = f" {e.confidence:.0%}" if e.confidence is not None else ""
+            review_reasons[e.comp_id] = (
+                f"VLM : {verdict}{conf}\n{e.reason}" if e.reason
+                else f"VLM : {verdict}{conf}"
+            )
+
+        return RefineResult(
+            model_id=model_id, prompt=_CAST_PROMPT, refined_mask=refined,
             review_labels=review_labels, review_categories=review_categories,
             review_reasons=review_reasons,
             exchanges=exchanges, n_components=c.n - 1,

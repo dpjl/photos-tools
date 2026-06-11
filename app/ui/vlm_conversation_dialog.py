@@ -121,7 +121,10 @@ class VLMConversationDialog(QDialog):
     def _make_card(self, ex) -> QFrame:
         removed = ex.removed
         accent = "#e57373" if removed else "#81c784"
-        verdict = "DÉCOR — retiré" if removed else "DÉFAUT — gardé"
+        if getattr(ex, "kind", "line") == "cast":
+            verdict = "NATUREL — retiré" if removed else "CAST — gardé"
+        else:
+            verdict = "DÉCOR — retiré" if removed else "DÉFAUT — gardé"
 
         card = QFrame()
         card.setStyleSheet(
@@ -133,7 +136,8 @@ class VLMConversationDialog(QDialog):
         lay.setSpacing(6)
 
         conf = f" · confiance {ex.confidence:.0%}" if ex.confidence is not None else ""
-        kind = "ligne" if getattr(ex, "kind", "line") == "line" else "tache"
+        kind = {"line": "ligne", "blob": "tache", "cast": "zone rouge"}.get(
+            getattr(ex, "kind", "line"), "tache")
         title = QLabel(
             f"<b>#{ex.comp_id}</b> · {kind} · {ex.length}×{getattr(ex,'thickness','?')}px · "
             f"<span style='color:{accent}; font-weight:700'>{verdict}</span>{conf}"

@@ -11,7 +11,7 @@ from PyQt6.QtCore import pyqtSlot, QTimer
 
 from ui.batch_window_constants import (
     _FAST_PREVIEW_IDS, _PREVIEW_TABS,
-    _TAB_MASK, _TAB_WB, _TAB_REDEYE,
+    _TAB_MASK, _TAB_REDZONE, _TAB_WB, _TAB_REDEYE,
     _TAB_CROP,
     _TAB_PREVIEW, _TAB_RESULT,
     _TAB_ORIGIN,
@@ -62,7 +62,7 @@ class PreviewMixin:
         self._prev_tab_index = index
 
         # 2. Sync éditeurs → cfg en mémoire quand on quitte un onglet éditeur
-        if prev in (_TAB_MASK, _TAB_WB, _TAB_REDEYE, _TAB_CROP):
+        if prev in (_TAB_MASK, _TAB_REDZONE, _TAB_WB, _TAB_REDEYE, _TAB_CROP):
             self._sync_editor_state()
 
         # 3. Charger le résultat si besoin
@@ -90,6 +90,8 @@ class PreviewMixin:
             return self._preview_view
         if index == _TAB_MASK:
             return self._mask_panel._canvas
+        if index == _TAB_REDZONE:
+            return self._redzone_panel._canvas
         if index == _TAB_WB:
             return self._wb_panel._canvas
         if index == _TAB_REDEYE:
@@ -202,10 +204,11 @@ class PreviewMixin:
         return out
 
     def _refresh_panels(self, img: np.ndarray) -> None:
-        """Met à jour les panneaux Masque, Blanc, Yeux rouges et Preview."""
+        """Met à jour les panneaux Masque, Zones rouges, Blanc, Yeux rouges et Preview."""
         if self._current_cfg is None:
             return
         self._mask_panel._canvas.set_display_image(img)
+        self._redzone_panel._canvas.set_display_image(img)
         self._wb_panel._canvas.set_display_image(img)
         self._redeye_panel._canvas.set_display_image(img)
         self._preview_full_img = None
@@ -272,6 +275,7 @@ class PreviewMixin:
         if result_img is not None:
             self._preview_status_lbl.setText("Preview complet")
             self._mask_panel._canvas.set_display_image(result_img)
+            self._redzone_panel._canvas.set_display_image(result_img)
             self._wb_panel._canvas.set_display_image(result_img)
             self._redeye_panel._canvas.set_display_image(result_img)
             if self._preview_overlay_step:

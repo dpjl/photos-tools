@@ -42,9 +42,10 @@ class BatchImageConfig:
     step_enabled:    dict[str, bool]     = field(default_factory=dict)
     step_params:     dict[str, dict]     = field(default_factory=dict)
 
-    # État des étapes avec état instance (inpaint / WB / redeye)
+    # État des étapes avec état instance (inpaint / WB / redeye / zones rouges)
     inpaint_mask:    Optional[np.ndarray] = field(default=None, repr=False)
     redeye_mask:     Optional[np.ndarray] = field(default=None, repr=False)
+    redzone_mask:    Optional[np.ndarray] = field(default=None, repr=False)
     crop_rect:       Optional[tuple[float, float, float, float]] = None
     wb_pick:         Optional[tuple[int, int]] = None
     wb_patch_radius: int = 5
@@ -72,6 +73,7 @@ class BatchImageConfig:
             step_params     = {k: dict(v) for k, v in self.step_params.items()},
             inpaint_mask    = self.inpaint_mask.copy() if self.inpaint_mask is not None else None,
             redeye_mask     = self.redeye_mask.copy() if self.redeye_mask is not None else None,
+            redzone_mask    = self.redzone_mask.copy() if self.redzone_mask is not None else None,
             crop_rect       = self.crop_rect,
             wb_pick         = self.wb_pick,
             wb_patch_radius = self.wb_patch_radius,
@@ -133,6 +135,7 @@ class BatchSession:
             if os.path.splitext(e)[1].lower() in IMAGE_EXTENSIONS
             and not e.endswith(".mask.png")
             and not e.endswith(".redeye_mask.png")
+            and not e.endswith(".redzone_mask.png")
         )
         self.images = []
         for e in entries:
@@ -177,6 +180,7 @@ class BatchSession:
         config.step_params     = {k: dict(v) for k, v in d.step_params.items()}
         config.inpaint_mask    = None
         config.redeye_mask     = None
+        config.redzone_mask    = None
         config.crop_rect       = None
         config.wb_pick         = None
         config.wb_patch_radius = d.wb_patch_radius
@@ -208,8 +212,9 @@ class BatchSession:
 
         recipe = build_recipe_dict(config)
         masks = {
-            "mask":        config.inpaint_mask,
-            "redeye_mask": config.redeye_mask,
+            "mask":         config.inpaint_mask,
+            "redeye_mask":  config.redeye_mask,
+            "redzone_mask": config.redzone_mask,
         }
 
         entry = mgr.save_export(stem, ext, result_img, recipe, masks)
@@ -269,6 +274,7 @@ def save_recipe(config: "BatchImageConfig") -> Optional[str]:
     recipe["version"] = 1
     recipe["has_mask"] = _mask_has_pixels(config.inpaint_mask)
     recipe["has_redeye_mask"] = _mask_has_pixels(config.redeye_mask)
+    recipe["has_redzone_mask"] = _mask_has_pixels(config.redzone_mask)
     # Pas besoin de source_filename dans le recipe de travail
     recipe.pop("source_filename", None)
     try:
@@ -282,6 +288,10 @@ def save_recipe(config: "BatchImageConfig") -> Optional[str]:
         if _mask_has_pixels(config.redeye_mask):
             redeye_path = os.path.join(source_dir, stem + ".redeye_mask.png")
             cv2.imwrite(redeye_path, config.redeye_mask)
+
+        if _mask_has_pixels(config.redzone_mask):
+            redzone_path = os.path.join(source_dir, stem + ".redzone_mask.png")
+            cv2.imwrite(redzone_path, config.redzone_mask)
 
         return recipe_path
     except Exception:
@@ -317,6 +327,13 @@ def load_recipe(file_path: str) -> Optional[dict]:
                 rmask = cv2.imread(redeye_path, cv2.IMREAD_GRAYSCALE)
                 if rmask is not None:
                     data["_redeye_mask"] = rmask
+
+        if data.get("has_redzone_mask"):
+            redzone_path = os.path.join(source_dir, stem + ".redzone_mask.png")
+            if os.path.exists(redzone_path):
+                zmask = cv2.imread(redzone_path, cv2.IMREAD_GRAYSCALE)
+                if zmask is not None:
+                    data["_redzone_mask"] = zmask
 
         return data
     except Exception:
@@ -442,6 +459,8 @@ def _apply_recipe(config: "BatchImageConfig", recipe: dict) -> None:
         config.inpaint_mask = recipe["_mask"]
     if "_redeye_mask" in recipe:
         config.redeye_mask = recipe["_redeye_mask"]
+    if "_redzone_mask" in recipe:
+        config.redzone_mask = recipe["_redzone_mask"]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -501,6 +520,9 @@ def build_step_log(
 
         if step_id == "inpaint" and "inpaint_mask_pixels" in context:
             entry["mask_pixels"] = int(context["inpaint_mask_pixels"])
+
+        if step_id == "redzone" and "redzone_mask_pixels" in context:
+            entry["mask_pixels"] = int(context["redzone_mask_pixels"])
 
         if step_id == "wb":
             if context.get("wb_applied"):
