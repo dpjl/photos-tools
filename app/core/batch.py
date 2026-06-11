@@ -49,6 +49,8 @@ class BatchImageConfig:
     crop_rect:       Optional[tuple[float, float, float, float]] = None
     wb_pick:         Optional[tuple[int, int]] = None
     wb_patch_radius: int = 5
+    # Version de référence IA active ({stem}.genref.NNN.*) — None = aucune
+    genref_version:  Optional[int] = None
 
     # Résultat du dernier run (Tester ou batch) — non sérialisé
     result_img:      Optional[np.ndarray] = field(default=None, repr=False)
@@ -77,6 +79,7 @@ class BatchImageConfig:
             crop_rect       = self.crop_rect,
             wb_pick         = self.wb_pick,
             wb_patch_radius = self.wb_patch_radius,
+            genref_version  = self.genref_version,
             customized      = self.customized,
         )
         return cfg
@@ -130,12 +133,14 @@ class BatchSession:
             except Exception:
                 pass
 
+        from core.genref_store import GENREF_SIDECAR_TAG
         entries = sorted(
             e for e in os.listdir(path)
             if os.path.splitext(e)[1].lower() in IMAGE_EXTENSIONS
             and not e.endswith(".mask.png")
             and not e.endswith(".redeye_mask.png")
             and not e.endswith(".redzone_mask.png")
+            and GENREF_SIDECAR_TAG not in e   # références IA sidecar ≠ images du batch
         )
         self.images = []
         for e in entries:
@@ -184,6 +189,7 @@ class BatchSession:
         config.crop_rect       = None
         config.wb_pick         = None
         config.wb_patch_radius = d.wb_patch_radius
+        config.genref_version  = None
         config.customized      = False
         config.result_img      = None
         config.context         = {}
@@ -244,6 +250,7 @@ def build_recipe_dict(config: "BatchImageConfig") -> dict:
         "crop_rect":       list(config.crop_rect) if config.crop_rect else None,
         "wb_pick":         list(config.wb_pick) if config.wb_pick else None,
         "wb_patch_radius":  config.wb_patch_radius,
+        "genref_version":   config.genref_version,
     }
 
 
@@ -407,6 +414,7 @@ def save_export_recipe(config: "BatchImageConfig") -> Optional[str]:
             "crop_rect":      list(config.crop_rect) if config.crop_rect else None,
             "wb_pick":        list(config.wb_pick) if config.wb_pick else None,
             "wb_patch_radius": config.wb_patch_radius,
+            "genref_version":  config.genref_version,
             "has_mask":       _mask_has_pixels(config.inpaint_mask),
         }
         with open(path, "w", encoding="utf-8") as f:
@@ -490,6 +498,9 @@ def _apply_recipe(config: "BatchImageConfig", recipe: dict) -> None:
         config.wb_pick = tuple(recipe["wb_pick"])
     if "wb_patch_radius" in recipe:
         config.wb_patch_radius = int(recipe["wb_patch_radius"])
+    if "genref_version" in recipe:
+        raw = recipe.get("genref_version")
+        config.genref_version = int(raw) if raw is not None else None
     config.customized = bool(recipe.get("customized", False))
     if "_mask" in recipe:
         config.inpaint_mask = recipe["_mask"]

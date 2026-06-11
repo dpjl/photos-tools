@@ -12,7 +12,7 @@ from PyQt6.QtCore import pyqtSlot, QTimer
 from ui.batch_window_constants import (
     _FAST_PREVIEW_IDS, _PREVIEW_TABS,
     _TAB_MASK, _TAB_REDZONE, _TAB_WB, _TAB_REDEYE,
-    _TAB_CROP,
+    _TAB_CROP, _TAB_GENREF,
     _TAB_PREVIEW, _TAB_RESULT,
     _TAB_ORIGIN,
 )
@@ -69,6 +69,10 @@ class PreviewMixin:
         if index == _TAB_RESULT and self._current_cfg is not None:
             self._update_dest_view(self._current_cfg)
 
+        # 3 bis. Onglet Réf. IA : versions + entrée (calcul auto si périmée)
+        if index == _TAB_GENREF and self._current_cfg is not None:
+            self._genref_on_tab_entered()
+
         # 4. (Ancien onglet diff supprimé)
 
         # 5. Appliquer le zoom au nouveau canvas, différé après le layout Qt
@@ -98,6 +102,8 @@ class PreviewMixin:
             return self._redeye_panel._canvas
         if index == _TAB_CROP:
             return self._crop_panel._canvas
+        if index == _TAB_GENREF:
+            return self._genref_tab_canvas()   # vue agrandie ou None
         if index == _TAB_ORIGIN:
             return self._origin_view
         if index == _TAB_RESULT:

@@ -46,12 +46,43 @@ class GenRefStep(StepBase):
         # Petit cache mémoire des entrées chargées du disque (betas only)
         self._entries: OrderedDict[tuple[str, str, int], genref.GenRefEntry] = \
             OrderedDict()
+        # Mode batch : référence injectée par la fenêtre batch (versions
+        # sidecar). Quand présente, elle remplace le cache par digest ; la
+        # LUT est ré-ajustée à la volée sur l'image d'entrée courante
+        # (fit ~0,3 s, mis en cache par (digest, tag)).
+        self._batch_ref: np.ndarray | None = None
+        self._batch_tag: str = ""
+        self._fit_cache: OrderedDict[tuple[str, str], tuple[np.ndarray, float]] = \
+            OrderedDict()
 
-    # ── API pour le dialogue ─────────────────────────────────────────────
+    # ── API pour le dialogue (mode simple) ───────────────────────────────
 
     def invalidate_cache(self) -> None:
         """À appeler après une génération : force la relecture du disque."""
         self._entries.clear()
+
+    # ── API pour la fenêtre batch (état d'instance, comme les masques) ──
+
+    def set_batch_ref(self, ref_bgr: np.ndarray, tag: str) -> None:
+        """Active une référence batch ; `tag` identifie la version (cache)."""
+        self._batch_ref = ref_bgr
+        self._batch_tag = tag
+
+    def clear_batch_ref(self) -> None:
+        self._batch_ref = None
+        self._batch_tag = ""
+
+    def _fit_for_batch(self, img: np.ndarray, digest: str) -> tuple[np.ndarray, float]:
+        key = (digest, self._batch_tag)
+        cached = self._fit_cache.get(key)
+        if cached is not None:
+            self._fit_cache.move_to_end(key)
+            return cached
+        beta, conf = genref.fit_lut(img, self._batch_ref)
+        self._fit_cache[key] = (beta, conf)
+        while len(self._fit_cache) > 6:
+            self._fit_cache.popitem(last=False)
+        return beta, conf
 
     def _get_entry(self, digest: str, style: str, seed: int):
         key = (digest, style, seed)
@@ -76,6 +107,22 @@ class GenRefStep(StepBase):
         saturation = float(params.get("saturation", d["saturation"]))
 
         digest = genref.image_digest(img)
+
+        # Mode batch : référence injectée → LUT ré-ajustée sur l'entrée
+        # courante (réapplicable sur n'importe quelle base).
+        if self._batch_ref is not None:
+            beta, conf = self._fit_for_batch(img, digest)
+            out = genref.apply_lut(img, beta, force=force,
+                                   saturation=saturation)
+            return out, {
+                "genref": {
+                    "status": "ok", "mode": "batch",
+                    "version": self._batch_tag,
+                    "force": force, "saturation": saturation,
+                    "conf_flot": round(conf, 3),
+                }
+            }
+
         entry = self._get_entry(digest, style, seed)
 
         if entry is None or entry.beta is None:

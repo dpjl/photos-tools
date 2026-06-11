@@ -53,7 +53,7 @@ from ui.notifications import NotificationManager, Level
 from ui.batch_window_constants import (
     _FAST_PREVIEW_IDS, _PREVIEW_TABS,
     _TAB_PREVIEW, _TAB_MASK, _TAB_REDZONE, _TAB_WB, _TAB_REDEYE,
-    _TAB_CROP, _TAB_ORIGIN, _TAB_RESULT,
+    _TAB_CROP, _TAB_GENREF, _TAB_ORIGIN, _TAB_RESULT,
 )
 from core.export_manager import ExportManager, ExportEntry
 from core.image_metadata import write_jpeg_with_source_exif
@@ -65,6 +65,7 @@ from ui.batch_mixins.exports import ExportsMixin
 from ui.batch_mixins.artifacts import ArtifactsMixin
 from ui.batch_mixins.redzones import RedZonesMixin
 from ui.batch_mixins.vlm import VlmMixin
+from ui.batch_mixins.genref import GenRefMixin
 
 
 class BatchWindow(
@@ -76,6 +77,7 @@ class BatchWindow(
     ArtifactsMixin,
     RedZonesMixin,
     VlmMixin,
+    GenRefMixin,
     QMainWindow,
 ):
     """Fenêtre de traitement par lots."""
@@ -396,6 +398,10 @@ class BatchWindow(
         self._step_list.crop_edit_requested.connect(self._on_crop_edit_requested)
         self._step_list.color_picker_requested.connect(self._on_color_picker_requested)
         self._step_list.overlay_toggled.connect(self._on_overlay_toggled)
+        # Bouton « Générer la référence IA… » du panneau → ouvre l'onglet dédié
+        self._step_list.genref_requested.connect(
+            lambda _sid: self._tabs.setCurrentIndex(_TAB_GENREF)
+        )
         scroll.setWidget(self._step_list)
         scl.addWidget(scroll, stretch=1)
         splitter.addWidget(step_container)
@@ -572,6 +578,7 @@ class BatchWindow(
         self._tabs.addTab(self._wb_panel,                                 "Blanc")         # _TAB_WB
         self._tabs.addTab(self._redeye_panel,                             "Yeux rouges")   # _TAB_REDEYE
         self._tabs.addTab(self._crop_panel,                               "Recadrage")     # _TAB_CROP
+        self._tabs.addTab(self._build_genref_tab(_SIDEBAR_W),             "Réf. IA")       # _TAB_GENREF
         self._tabs.addTab(self._wrap_with_sidebar(self._origin_view, _SIDEBAR_W), "Originale")  # _TAB_ORIGIN
 
         # ── Onglet Résultat : mosaïque d'exports ──

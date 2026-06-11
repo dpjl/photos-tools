@@ -130,6 +130,9 @@ class NavMixin:
         if self._tabs.currentIndex() == _TAB_RESULT:
             self._update_dest_view(cfg, force=True)
 
+        # ── Onglet Réf. IA : réinitialiser (entrée, triptyque, versions) ─────
+        self._genref_on_image_changed()
+
         fname = os.path.basename(cfg.file_path)
         self._statusbar.showMessage(f"{fname}  —  prêt")
 
@@ -239,6 +242,21 @@ class NavMixin:
         if crop_step and hasattr(crop_step, "set_crop_rect"):
             crop_step.set_crop_rect(cfg.crop_rect)
 
+        genref_step = self._steps_by_id.get("genref")
+        if genref_step and hasattr(genref_step, "set_batch_ref"):
+            ref = None
+            if cfg.genref_version is not None:
+                from core import genref_store
+                version = genref_store.load_version(cfg.file_path,
+                                                    cfg.genref_version)
+                if version is not None:
+                    ref = version.load_ref()
+            if ref is not None:
+                tag = f"{cfg.file_path}#{cfg.genref_version}"
+                genref_step.set_batch_ref(ref, tag)
+            else:
+                genref_step.clear_batch_ref()
+
     def _clear_instance_state(self) -> None:
         """Réinitialise les singletons à la fermeture."""
         inpaint_step = self._steps_by_id.get("inpaint")
@@ -256,6 +274,9 @@ class NavMixin:
         crop_step = self._steps_by_id.get("crop")
         if crop_step and hasattr(crop_step, "clear_crop_rect"):
             crop_step.clear_crop_rect()
+        genref_step = self._steps_by_id.get("genref")
+        if genref_step and hasattr(genref_step, "clear_batch_ref"):
+            genref_step.clear_batch_ref()
 
     # ── Rechargement depuis disque ────────────────────────────────────────────
 
