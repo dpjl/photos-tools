@@ -86,46 +86,83 @@ class _PregenWorker(QThread):
                 pass   # même tolérance que PipelineWorker : étape sautée
         return out
 
+    @staticmethod
+    def _shrink(img: np.ndarray, max_side: int = 1600) -> np.ndarray:
+        """Réduit l'entrée stockée en RAM. Sans perte pour l'usage aval :
+        la génération FLUX travaille à ≈1 Mpx et le prompt VLM à 896 px."""
+        h, w = img.shape[:2]
+        if max(h, w) <= max_side:
+            return img
+        s = max_side / max(h, w)
+        return cv2.resize(img, (int(w * s), int(h * s)),
+                          interpolation=cv2.INTER_AREA)
+
+    @staticmethod
+    def _unload_gpu(steps: bool = True) -> None:
+        """Vide la VRAM entre les passes (une seule famille de modèles à la
+        fois : étapes du pipeline, puis VLM, puis FLUX)."""
+        try:
+            from core.model_memory import unload_all_models
+            from steps import ALL_STEPS
+            unload_all_models(ALL_STEPS if steps else [])
+        except Exception:
+            pass
+
     def run(self):
         try:
             n = len(self._targets)
             generated = skipped = errors = 0
+            self.failures: list[tuple[str, str]] = []
 
-            # ── Phase A : entrées + prompts (VLM chargé une seule fois) ──
-            prepared: list[tuple[BatchImageConfig, np.ndarray, dict]] = []
+            def _fail(cfg, reason: str) -> None:
+                self.failures.append((cfg.filename, reason))
+                self.photo_skipped.emit(cfg.file_path, reason)
+
+            # ── Passe A1 : entrées (modèles d'étapes seuls sur le GPU) ───
+            self._unload_gpu()   # session précédente (FLUX, VLM, etc.)
+            staged: list[tuple[BatchImageConfig, np.ndarray]] = []
             for i, cfg in enumerate(self._targets):
                 if self._cancel:
                     break
-                name = cfg.filename
                 if self._skip_existing and genref_store.list_versions(
                         cfg.file_path):
                     self.photo_skipped.emit(cfg.file_path, "version existante")
                     skipped += 1
                     continue
-                self.progress.emit(i + 1, n, f"{name} — entrée + prompt (VLM)")
+                self.progress.emit(i + 1, n, f"{cfg.filename} — entrée "
+                                             "(pipeline jusqu'à l'étape)")
                 img = cv2.imread(cfg.file_path, cv2.IMREAD_COLOR)
                 if img is None:
-                    self.photo_skipped.emit(cfg.file_path, "illisible")
+                    _fail(cfg, "image illisible")
                     errors += 1
                     continue
                 try:
-                    input_img = self._compute_input(cfg, img)
+                    input_img = self._shrink(self._compute_input(cfg, img))
+                except Exception as exc:
+                    _fail(cfg, f"entrée : {type(exc).__name__}: {exc}")
+                    errors += 1
+                    continue
+                staged.append((cfg, input_img))
+
+            # ── Passe A2 : prompts (VLM seul sur le GPU) ─────────────────
+            self._unload_gpu()
+            prepared: list[tuple[BatchImageConfig, np.ndarray, dict]] = []
+            for i, (cfg, input_img) in enumerate(staged):
+                if self._cancel:
+                    break
+                self.progress.emit(i + 1, len(staged),
+                                   f"{cfg.filename} — prompt (VLM)")
+                try:
                     info = genref.write_prompt(input_img, self._style)
                 except Exception as exc:
-                    self.photo_skipped.emit(cfg.file_path, f"prompt : {exc}")
+                    _fail(cfg, f"prompt : {type(exc).__name__}: {exc}")
                     errors += 1
                     continue
                 prepared.append((cfg, input_img, info))
 
-            # Libérer le VLM avant la série de générations
-            try:
-                from core.vlm_refine import VLMRefiner
-                if VLMRefiner._instance is not None:
-                    VLMRefiner._instance.unload()
-            except Exception:
-                pass
+            # ── Passe B : générations (FLUX seul sur le GPU) ─────────────
+            self._unload_gpu()
 
-            # ── Phase B : générations (FLUX gardé chargé pour la série) ──
             engine = genref.GenRefEngine.get()
             try:
                 for j, (cfg, input_img, info) in enumerate(prepared):
@@ -147,6 +184,8 @@ class _PregenWorker(QThread):
                         generated += 1
                         self.photo_done.emit(cfg.file_path, version.index)
                     except Exception as exc:
+                        self.failures.append(
+                            (name, f"génération : {type(exc).__name__}: {exc}"))
                         self.photo_skipped.emit(cfg.file_path,
                                                 f"génération : {exc}")
                         errors += 1
@@ -324,6 +363,18 @@ class GenRefPregenMixin:
             level = Level.SUCCESS if errors == 0 else Level.WARNING
             self._notif.notify("Pré-génération FLUX terminée", msg,
                                level=level, duration=8000)
+        # Bilan détaillé des échecs : les messages de la barre d'état ne font
+        # que passer — sans ce récapitulatif l'utilisateur ne sait pas
+        # pourquoi rien n'a été généré.
+        failures = list(getattr(self._pregen_worker, "failures", []) or [])
+        if failures:
+            shown = failures[:8]
+            lines = [f"• {name} — {reason}" for name, reason in shown]
+            if len(failures) > len(shown):
+                lines.append(f"… +{len(failures) - len(shown)} autre(s)")
+            QMessageBox.warning(
+                self, "Pré-génération : échecs",
+                f"{msg}\n\nDétail des échecs :\n" + "\n".join(lines))
 
     def _on_pregen_failed(self, msg: str) -> None:
         self._pregen_reset_buttons()
