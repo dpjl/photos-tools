@@ -72,11 +72,13 @@ class _GenerateWorker(QThread):
 
     def run(self):
         try:
-            # Libérer la VRAM des modèles du pipeline avant FLUX (~10 Go)
+            # Libérer la VRAM des modèles du pipeline avant FLUX (~10 Go),
+            # SANS décharger FLUX lui-même : le recharger à chaque génération
+            # provoque des pics de RAM transitoires → OOM kill.
             try:
                 from core.model_memory import unload_all_models
                 from steps import ALL_STEPS
-                unload_all_models(ALL_STEPS)
+                unload_all_models(ALL_STEPS, keep={"FLUX Kontext"})
             except Exception:
                 pass
             entry = genref.build_entry(

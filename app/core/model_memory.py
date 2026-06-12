@@ -37,8 +37,13 @@ def gpu_memory() -> "tuple[int, int] | None":
         return None
 
 
-def unload_all_models(steps=None) -> list[str]:
-    """Décharge tous les modèles connus. Retourne la liste de ce qui a été libéré."""
+def unload_all_models(steps=None, keep: "frozenset[str] | set[str]" = frozenset()) -> list[str]:
+    """Décharge tous les modèles connus. Retourne la liste de ce qui a été libéré.
+
+    keep : libellés de singletons à NE PAS décharger (ex. {"FLUX Kontext"}
+    avant une génération — recharger ses ~14 Go à chaque fois provoque des
+    pics de RAM transitoires et finit en OOM kill).
+    """
     freed: list[str] = []
 
     # Étapes du pipeline (objets passés par l'appelant)
@@ -55,6 +60,8 @@ def unload_all_models(steps=None) -> list[str]:
         ("core.vlm_refine", "VLMRefiner", "VLM"),
         ("core.genref", "GenRefEngine", "FLUX Kontext"),
     ):
+        if label in keep:
+            continue
         try:
             mod = __import__(import_path, fromlist=[cls_name])
             cls = getattr(mod, cls_name)

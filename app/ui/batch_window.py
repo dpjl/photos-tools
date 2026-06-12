@@ -1077,6 +1077,14 @@ class BatchWindow(
                 return
             self._stop()
 
+        # Arrêter proprement les workers d'arrière-plan encore actifs
+        for worker in (getattr(self, "_full_preview_worker", None),
+                       getattr(self, "_genref_input_worker", None)):
+            if worker is not None and worker.isRunning():
+                if hasattr(worker, "cancel"):
+                    worker.cancel()
+                worker.wait(1000)
+
         self._save_current_state()
         self._session.save_session_meta()
         self._clear_instance_state()

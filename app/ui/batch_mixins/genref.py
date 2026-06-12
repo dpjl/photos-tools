@@ -116,7 +116,9 @@ class _GenRefGenWorker(QThread):
             try:
                 from core.model_memory import unload_all_models
                 from steps import ALL_STEPS
-                unload_all_models(ALL_STEPS)
+                # Garder FLUX chargé : le recharger à chaque génération
+                # provoque des pics de RAM transitoires → OOM kill.
+                unload_all_models(ALL_STEPS, keep={"FLUX Kontext"})
             except Exception:
                 pass
             self.phase.emit("Génération de la référence (FLUX)…")
@@ -149,6 +151,23 @@ class _GenRefPromptWorker(QThread):
             self.failed.emit(str(exc))
 
 
+class _GenRefTranslateWorker(QThread):
+    """Traduction FR → EN optimisée prompt (VLM)."""
+
+    done   = pyqtSignal(str)
+    failed = pyqtSignal(str)
+
+    def __init__(self, text_fr: str, parent=None):
+        super().__init__(parent)
+        self._text = text_fr
+
+    def run(self):
+        try:
+            self.done.emit(genref.translate_to_prompt_en(self._text))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # Mixin
 # ══════════════════════════════════════════════════════════════════════════
@@ -164,6 +183,7 @@ class GenRefMixin:
         self._genref_input_worker: Optional[PipelineWorker] = None
         self._genref_gen_worker: Optional[_GenRefGenWorker] = None
         self._genref_prompt_worker: Optional[_GenRefPromptWorker] = None
+        self._genref_translate_worker: Optional[_GenRefTranslateWorker] = None
         self._genref_versions: list[genref_store.GenRefVersion] = []
         self._genref_prompt_info: dict = {}
         self._genref_enlarged_role: Optional[str] = None
@@ -191,6 +211,11 @@ class GenRefMixin:
             " border:1px solid #2a2a4a; border-radius:4px; font-size:11px; }"
         )
         left_lay.addWidget(self._genref_prompt_edit)
+
+        # Rangée traducteur FR → EN (masquée par défaut, toggle en sidebar)
+        self._genref_translator = self._build_genref_translator()
+        self._genref_translator.setVisible(False)
+        left_lay.addWidget(self._genref_translator)
 
         self._genref_stack = QStackedWidget()
 
@@ -310,6 +335,18 @@ class GenRefMixin:
         self._genref_write_btn.clicked.connect(self._genref_write_prompt)
         sb.addWidget(self._genref_write_btn)
 
+        self._genref_translator_toggle = QPushButton("🌐  Traducteur FR → EN")
+        self._genref_translator_toggle.setCheckable(True)
+        self._genref_translator_toggle.setToolTip(
+            "Afficher le traducteur : écrire en français, obtenir l'anglais "
+            "optimisé prompt (copié automatiquement) et le coller dans le "
+            "prompt."
+        )
+        self._genref_translator_toggle.setStyleSheet(self._genref_btn_css())
+        self._genref_translator_toggle.toggled.connect(
+            self._genref_toggle_translator)
+        sb.addWidget(self._genref_translator_toggle)
+
         self._genref_gen_btn = QPushButton("✨  Générer (FLUX, ~2-3 min)")
         self._genref_gen_btn.setStyleSheet(self._genref_btn_css(accent=True))
         self._genref_gen_btn.clicked.connect(self._genref_generate)
@@ -322,6 +359,65 @@ class GenRefMixin:
 
         lay.addWidget(sidebar)
         return wrapper
+
+    def _build_genref_translator(self) -> QWidget:
+        """Rangée FR → EN : texte français | Traduire | anglais (auto-copié)."""
+        row = QWidget()
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+
+        self._genref_fr_edit = QPlainTextEdit()
+        self._genref_fr_edit.setFixedHeight(56)
+        self._genref_fr_edit.setPlaceholderText(
+            "Texte en français (ex. « rends le mur blanc cassé et la nappe "
+            "bleu pâle »)…")
+        self._genref_fr_edit.setStyleSheet(
+            "QPlainTextEdit { background:#14141f; color:#cdd;"
+            " border:1px solid #2a2a4a; border-radius:4px; font-size:11px; }"
+        )
+        lay.addWidget(self._genref_fr_edit, stretch=1)
+
+        mid = QWidget()
+        mid_lay = QVBoxLayout(mid)
+        mid_lay.setContentsMargins(0, 0, 0, 0)
+        mid_lay.setSpacing(2)
+        self._genref_translate_btn = QPushButton("Traduire ➜")
+        self._genref_translate_btn.setToolTip(
+            "Traduit en anglais optimisé pour un prompt FLUX (VLM), puis "
+            "copie le résultat dans le presse-papiers — coller (Ctrl+V) "
+            "dans le prompt à l'endroit voulu."
+        )
+        self._genref_translate_btn.setStyleSheet(self._genref_btn_css())
+        self._genref_translate_btn.clicked.connect(self._genref_translate)
+        mid_lay.addWidget(self._genref_translate_btn)
+        self._genref_translate_status = QLabel("")
+        self._genref_translate_status.setStyleSheet(
+            "color:#6e8; font-size:9px;")
+        self._genref_translate_status.setAlignment(
+            Qt.AlignmentFlag.AlignCenter)
+        mid_lay.addWidget(self._genref_translate_status)
+        lay.addWidget(mid)
+
+        self._genref_en_edit = QPlainTextEdit()
+        self._genref_en_edit.setFixedHeight(56)
+        self._genref_en_edit.setReadOnly(True)
+        self._genref_en_edit.setPlaceholderText(
+            "Traduction anglaise — copiée automatiquement, Ctrl+V dans le "
+            "prompt.")
+        self._genref_en_edit.setStyleSheet(
+            "QPlainTextEdit { background:#101a14; color:#bda;"
+            " border:1px solid #2a4a2a; border-radius:4px; font-size:11px; }"
+        )
+        lay.addWidget(self._genref_en_edit, stretch=1)
+
+        copy_btn = QPushButton("📋")
+        copy_btn.setFixedWidth(28)
+        copy_btn.setToolTip("Recopier la traduction dans le presse-papiers")
+        copy_btn.setStyleSheet(self._genref_btn_css())
+        copy_btn.clicked.connect(self._genref_copy_translation)
+        lay.addWidget(copy_btn)
+        return row
 
     @staticmethod
     def _genref_btn_css(accent: bool = False) -> str:
@@ -339,6 +435,7 @@ class GenRefMixin:
             return
         self._genref_enlarged_role = role
         self._genref_prompt_edit.setVisible(False)   # superposition exacte
+        self._genref_translator.setVisible(False)
         self._genref_big_view.set_image(pane.image())
         self._genref_stack.setCurrentIndex(1)
         if self._shared_zoom is not None:
@@ -352,6 +449,8 @@ class GenRefMixin:
             self._shared_zoom = state
         self._genref_enlarged_role = None
         self._genref_prompt_edit.setVisible(True)
+        self._genref_translator.setVisible(
+            self._genref_translator_toggle.isChecked())
         self._genref_stack.setCurrentIndex(0)
 
     def eventFilter(self, obj, event):
@@ -571,10 +670,52 @@ class GenRefMixin:
                 parts.append("ℹ Étape décochée dans le pipeline.")
         self._genref_status_lbl.setText("\n".join(parts))
 
+    # ── Traducteur FR → EN ────────────────────────────────────────────────
+
+    def _genref_toggle_translator(self, visible: bool) -> None:
+        if self._genref_enlarged_role is None:
+            self._genref_translator.setVisible(visible)
+        if visible:
+            self._genref_fr_edit.setFocus()
+
+    def _genref_translate(self) -> None:
+        if self._genref_busy():
+            return
+        text = self._genref_fr_edit.toPlainText().strip()
+        if not text:
+            self._genref_translate_status.setText("texte vide")
+            return
+        self._genref_set_busy(True)
+        self._genref_translate_status.setText("⏳ VLM…")
+        self._genref_translate_worker = _GenRefTranslateWorker(text, self)
+        self._genref_translate_worker.done.connect(self._genref_on_translated)
+        self._genref_translate_worker.failed.connect(
+            self._genref_on_translate_failed)
+        self._genref_translate_worker.start()
+
+    def _genref_on_translated(self, text_en: str) -> None:
+        self._genref_set_busy(False)
+        self._genref_en_edit.setPlainText(text_en)
+        self._genref_copy_translation()
+
+    def _genref_on_translate_failed(self, msg: str) -> None:
+        self._genref_set_busy(False)
+        self._genref_translate_status.setText("échec")
+        QMessageBox.warning(self, "Échec", f"Traduction impossible :\n{msg}")
+
+    def _genref_copy_translation(self) -> None:
+        text = self._genref_en_edit.toPlainText().strip()
+        if not text:
+            return
+        from PyQt6.QtWidgets import QApplication
+        QApplication.clipboard().setText(text)
+        self._genref_translate_status.setText("✓ copié — Ctrl+V")
+
     # ── Rédaction du prompt ───────────────────────────────────────────────
 
     def _genref_busy(self) -> bool:
-        for w in (self._genref_prompt_worker, self._genref_gen_worker):
+        for w in (self._genref_prompt_worker, self._genref_gen_worker,
+                  self._genref_translate_worker):
             if w is not None and w.isRunning():
                 return True
         return False
@@ -582,7 +723,8 @@ class GenRefMixin:
     def _genref_set_busy(self, busy: bool, label: str = "") -> None:
         for w in (self._genref_write_btn, self._genref_gen_btn,
                   self._genref_style_combo, self._genref_seed_spin,
-                  self._genref_delete_btn, self._genref_versions_list):
+                  self._genref_delete_btn, self._genref_versions_list,
+                  self._genref_translate_btn):
             w.setEnabled(not busy)
         if label:
             self._genref_status_lbl.setText(label)

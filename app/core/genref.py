@@ -257,6 +257,30 @@ def write_prompt(img_bgr: np.ndarray, style: str) -> dict:
     return {"prompt": prompt, "items": items, "cast": cast}
 
 
+def translate_to_prompt_en(text_fr: str) -> str:
+    """Traduit un texte français en anglais optimisé pour un prompt FLUX.
+
+    Style impératif et concret (vocabulaire couleurs/objets), sans
+    commentaire — le résultat est destiné à être collé dans le prompt.
+    Charge le VLM (lourd) au besoin.
+    """
+    from core.vlm_refine import VLMRefiner
+
+    ask = (
+        "Translate the following French text into English, optimized as a "
+        "fragment of an image-editing instruction prompt for the FLUX.1 "
+        "Kontext model: imperative style, concise, concrete color and "
+        "object vocabulary, no commentary, no quotes. "
+        "Answer ONLY with the translation.\n\n"
+        f"French text:\n{text_fr.strip()}"
+    )
+    out = VLMRefiner.get().ask([], ask, max_new_tokens=300).strip()
+    # Retirer d'éventuels guillemets d'encadrement
+    if len(out) >= 2 and out[0] in "\"'«" and out[-1] in "\"'»":
+        out = out[1:-1].strip()
+    return out
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # Génération de la référence (FLUX.1 Kontext, singleton déchargeable)
 # ══════════════════════════════════════════════════════════════════════════
@@ -288,9 +312,27 @@ class GenRefEngine:
         except Exception:
             pass
 
+    @staticmethod
+    def _available_ram_gb() -> float | None:
+        """RAM disponible (Go) via /proc/meminfo, None si indisponible."""
+        try:
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemAvailable:"):
+                        return int(line.split()[1]) / (1024 * 1024)
+        except Exception:
+            pass
+        return None
+
+    # Chargement du pipeline : ~14 Go résidents + pic transitoire pendant la
+    # lecture des poids. En dessous de ce seuil, le chargement se terminerait
+    # en OOM kill (processus tué net par le noyau, non interceptable).
+    _MIN_RAM_GB = 15.0
+
     def _ensure(self):
         if self._pipe is not None:
             return self._pipe
+        import gc
         import torch
         from diffusers import FluxKontextPipeline
 
@@ -302,6 +344,19 @@ class GenRefEngine:
                 VLMRefiner._instance.unload()
         except Exception:
             pass
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        # Garde-fou RAM : mieux vaut une erreur propre qu'un SIGKILL du noyau.
+        avail = self._available_ram_gb()
+        if avail is not None and avail < self._MIN_RAM_GB:
+            raise RuntimeError(
+                f"RAM disponible insuffisante pour charger FLUX "
+                f"({avail:.1f} Go libres, {self._MIN_RAM_GB:.0f} Go requis). "
+                "Fermer des applications ou utiliser le bouton 🧹 pour "
+                "décharger les modèles, puis réessayer."
+            )
 
         pipe = FluxKontextPipeline.from_pretrained(
             config.FLUX_KONTEXT_REPO, torch_dtype=torch.bfloat16)
