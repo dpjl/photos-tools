@@ -334,7 +334,8 @@ class VLMRefiner:
             return
         self.unload()
         from transformers import AutoProcessor
-        self._proc = AutoProcessor.from_pretrained(model_id)
+        self._proc = AutoProcessor.from_pretrained(
+            model_id, cache_dir=config.HF_HUB_DIR)
         self._model = self._load_model(model_id)
         self._model_id = model_id
 
@@ -346,7 +347,8 @@ class VLMRefiner:
         """
         import transformers
         torch = self._torch
-        kw = dict(dtype=torch.bfloat16, attn_implementation="sdpa", device_map=self._device)
+        kw = dict(dtype=torch.bfloat16, attn_implementation="sdpa",
+                  device_map=self._device, cache_dir=config.HF_HUB_DIR)
         last_err = None
         for cls_name in ("AutoModelForImageTextToText", "AutoModelForMultimodalLM"):
             cls = getattr(transformers, cls_name, None)

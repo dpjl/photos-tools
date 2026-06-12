@@ -233,6 +233,10 @@ def write_prompt(img_bgr: np.ndarray, style: str) -> dict:
     import re
     from core.vlm_refine import VLMRefiner
 
+    # Le VLM (~9 Go) et FLUX résident ne tiennent pas ensemble en VRAM :
+    # libérer FLUX d'abord (rechargé automatiquement à la génération).
+    GenRefEngine.release_for_vlm()
+
     cast = cast_name(img_bgr)
     ask = _ASK_COURT if style == "court" else _ASK_DETAILLE
 
@@ -266,6 +270,8 @@ def translate_to_prompt_en(text_fr: str) -> str:
     """
     from core.vlm_refine import VLMRefiner
 
+    GenRefEngine.release_for_vlm()   # VLM et FLUX exclusifs en VRAM
+
     ask = (
         "Translate the following French text into English, optimized as a "
         "fragment of an image-editing instruction prompt for the FLUX.1 "
@@ -286,7 +292,22 @@ def translate_to_prompt_en(text_fr: str) -> str:
 # ══════════════════════════════════════════════════════════════════════════
 
 class GenRefEngine:
-    """Pipeline FLUX Kontext chargé paresseusement (≈10 Go VRAM)."""
+    """Pipeline FLUX Kontext chargé paresseusement, résident en VRAM.
+
+    Le pipeline fp4 complet (~13,4 Go) tient dans 16 Go de VRAM : on évite
+    ainsi le mode cpu_offload qui gardait ~14 Go résidents en RAM système
+    en permanence — cause des OOM kill (« Killed ») observés pendant
+    l'inférence sur une machine à 32 Go. En VRAM, un dépassement éventuel
+    devient une erreur CUDA interceptable au lieu d'un SIGKILL noyau.
+
+    Conséquence : VLM (≈9 Go) et FLUX ne cohabitent plus sur le GPU — la
+    bascule est automatique dans les deux sens (release_for_vlm() avant un
+    usage VLM ; _ensure() décharge le VLM). Recharger l'un ou l'autre coûte
+    ~10-20 s, négligeable devant une génération.
+
+    Si la VRAM ne suffit pas au chargement, repli automatique sur
+    enable_model_cpu_offload (ancien mode, plus gourmand en RAM).
+    """
 
     _instance: "GenRefEngine | None" = None
 
@@ -298,6 +319,7 @@ class GenRefEngine:
 
     def __init__(self) -> None:
         self._pipe = None
+        self._gpu_resident = False
 
     @property
     def loaded(self) -> bool:
@@ -305,12 +327,26 @@ class GenRefEngine:
 
     def unload(self) -> None:
         self._pipe = None
+        self._gpu_resident = False
+        import gc
+        gc.collect()
         try:
             import torch
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
         except Exception:
             pass
+
+    @classmethod
+    def release_for_vlm(cls) -> None:
+        """Libère le GPU avant un usage VLM (prompt, traduction).
+
+        Sans effet si le pipeline n'est pas chargé. Il sera rechargé
+        automatiquement à la prochaine génération.
+        """
+        inst = cls._instance
+        if inst is not None and inst._pipe is not None:
+            inst.unload()
 
     @staticmethod
     def _available_ram_gb() -> float | None:
@@ -324,10 +360,10 @@ class GenRefEngine:
             pass
         return None
 
-    # Chargement du pipeline : ~14 Go résidents + pic transitoire pendant la
-    # lecture des poids. En dessous de ce seuil, le chargement se terminerait
-    # en OOM kill (processus tué net par le noyau, non interceptable).
-    _MIN_RAM_GB = 15.0
+    # Pic de RAM transitoire pendant la lecture/transfert des poids vers le
+    # GPU. En dessous, le chargement risquerait l'OOM kill (SIGKILL noyau,
+    # non interceptable) — on lève une erreur propre à la place.
+    _MIN_RAM_GB = 8.0
 
     def _ensure(self):
         if self._pipe is not None:
@@ -336,8 +372,7 @@ class GenRefEngine:
         import torch
         from diffusers import FluxKontextPipeline
 
-        # Libère le VLM (il a pu servir à rédiger le prompt juste avant) :
-        # FLUX + VLM ne tiennent pas ensemble sur 16 Go.
+        # Libère le VLM : FLUX + VLM ne tiennent pas ensemble sur 16 Go.
         try:
             from core.vlm_refine import VLMRefiner
             if VLMRefiner._instance is not None:
@@ -348,7 +383,7 @@ class GenRefEngine:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        # Garde-fou RAM : mieux vaut une erreur propre qu'un SIGKILL du noyau.
+        # Garde-fou RAM : mieux vaut une erreur propre qu'un SIGKILL.
         avail = self._available_ram_gb()
         if avail is not None and avail < self._MIN_RAM_GB:
             raise RuntimeError(
@@ -359,9 +394,17 @@ class GenRefEngine:
             )
 
         pipe = FluxKontextPipeline.from_pretrained(
-            config.FLUX_KONTEXT_REPO, torch_dtype=torch.bfloat16)
-        pipe.enable_model_cpu_offload()
+            config.FLUX_KONTEXT_REPO, torch_dtype=torch.bfloat16,
+            cache_dir=config.HF_HUB_DIR)
         pipe.set_progress_bar_config(disable=True)
+        try:
+            pipe.to("cuda")
+            self._gpu_resident = True
+        except torch.cuda.OutOfMemoryError:
+            # VRAM insuffisante (autre charge GPU ?) → repli cpu_offload.
+            torch.cuda.empty_cache()
+            pipe.enable_model_cpu_offload()
+            self._gpu_resident = False
         self._pipe = pipe
         return pipe
 
@@ -383,10 +426,43 @@ class GenRefEngine:
                 on_progress(step_index + 1, steps)
             return kwargs
 
-        out = pipe(image=pil, prompt=prompt, guidance_scale=guidance,
-                   width=tw, height=th, num_inference_steps=steps,
-                   generator=torch.Generator("cpu").manual_seed(int(seed)),
-                   callback_on_step_end=_cb).images[0]
+        try:
+            try:
+                out = pipe(image=pil, prompt=prompt, guidance_scale=guidance,
+                           width=tw, height=th, num_inference_steps=steps,
+                           generator=torch.Generator("cpu").manual_seed(int(seed)),
+                           callback_on_step_end=_cb).images[0]
+            except torch.cuda.OutOfMemoryError:
+                if not self._gpu_resident:
+                    raise
+                # VRAM insuffisante en mode résident : repli cpu_offload puis
+                # une nouvelle tentative (plus lent mais sûr côté VRAM).
+                self.unload()
+                from diffusers import FluxKontextPipeline
+                pipe = FluxKontextPipeline.from_pretrained(
+                    config.FLUX_KONTEXT_REPO, torch_dtype=torch.bfloat16,
+                    cache_dir=config.HF_HUB_DIR)
+                pipe.set_progress_bar_config(disable=True)
+                pipe.enable_model_cpu_offload()
+                self._pipe = pipe
+                self._gpu_resident = False
+                out = pipe(image=pil, prompt=prompt, guidance_scale=guidance,
+                           width=tw, height=th, num_inference_steps=steps,
+                           generator=torch.Generator("cpu").manual_seed(int(seed)),
+                           callback_on_step_end=_cb).images[0]
+        finally:
+            # Mode résident : libérer SYSTÉMATIQUEMENT la VRAM après chaque
+            # génération, sinon les étapes suivantes du pipeline (SCUNet,
+            # GFPGAN…) tombent en CUDA OOM. Sans danger côté RAM : les poids
+            # ne vivent qu'en VRAM, le rechargement (~15 s) relit le disque.
+            # En repli cpu_offload, on GARDE le pipeline chargé : c'est le
+            # cycle déchargement/rechargement en RAM qui causait les
+            # OOM kill (« Killed »).
+            if self._gpu_resident:
+                # La référence locale doit disparaître AVANT le gc.collect()
+                # de unload(), sinon les tenseurs restent vivants.
+                del pipe
+                self.unload()
         return cv2.cvtColor(np.array(out), cv2.COLOR_RGB2BGR)
 
 

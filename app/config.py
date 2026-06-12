@@ -15,6 +15,10 @@ BASE_DIR = os.path.dirname(APP_DIR)
 # Doit être défini AVANT tout import de transformers/huggingface_hub.
 HF_HOME_DIR = os.path.join(BASE_DIR, "models", "hf_cache")
 os.environ.setdefault("HF_HOME", HF_HOME_DIR)
+# Cache hub explicite — passé en cache_dir à chaque from_pretrained pour ne
+# JAMAIS dépendre de l'ordre des imports : aucun modèle ne doit atterrir
+# dans ~/.cache/huggingface (volume système étroit).
+HF_HUB_DIR = os.path.join(HF_HOME_DIR, "hub")
 
 GFPGAN_MODEL_PATH        = os.path.join(BASE_DIR, "GFPGANv1.4.pth")
 SCUNET_MODELS_DIR        = os.path.join(BASE_DIR, "models")
