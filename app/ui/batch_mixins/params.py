@@ -8,7 +8,8 @@ from PyQt6.QtWidgets import QMessageBox
 from core.batch import save_recipe
 from ui.param_history import (
     SetParamCommand, PropagateParamCommand,
-    PropagateEnabledCommand, MoveStepCommand, ToggleStepCommand,
+    PropagateEnabledCommand, PropagatePositionCommand,
+    MoveStepCommand, ToggleStepCommand,
 )
 from ui.batch_window_constants import (
     _FAST_PREVIEW_IDS, _TAB_MASK, _TAB_REDZONE, _TAB_WB, _TAB_REDEYE, _TAB_CROP,
@@ -198,6 +199,62 @@ class ParamsMixin:
             self._notif.notify(
                 f"Étape {state_str} : {step_id}",
                 f"Propagé à {n} image(s)",
+                level=Level.INFO,
+                duration=3500,
+            )
+
+    @pyqtSlot(str)
+    def _on_position_propagate(self, step_id: str) -> None:
+        """Propage la POSITION d'une étape aux images sélectionnées.
+
+        L'étape prend, dans l'ordre de chaque image cible, le même rang que
+        dans l'image courante ; les autres étapes se décalent.
+        """
+        from ui.notifications import Level
+        self._save_current_state()
+        order = self._step_list.get_order()
+        if step_id not in order:
+            return
+        index = order.index(step_id)
+        targets = self._propagation_targets()
+        if not targets:
+            return
+        if not self._confirm_propagation(
+            "Propager la position",
+            f"L'étape « {step_id} » va être placée en position {index + 1} "
+            f"sur {len(targets)} photo(s) (les autres étapes se décalent).",
+        ):
+            return
+        old_orders = {cfg.file_path: list(cfg.step_order) for cfg in targets}
+        for cfg in targets:
+            cfg.step_order = PropagatePositionCommand.place_step(
+                cfg.step_order, step_id, index)
+            save_recipe(cfg)
+
+        def _apply_order_ui(new_order: list) -> None:
+            self._applying_order = True
+            self._step_list.set_order(new_order)
+            self._applying_order = False
+            self._update_result_diff_indicator()
+            self._schedule_preview_update()
+
+        if self._current_cfg in targets:
+            _apply_order_ui(list(self._current_cfg.step_order))
+
+        cmd = PropagatePositionCommand(
+            step_id, index, targets, old_orders,
+            lambda: self._current_cfg,
+            _apply_order_ui,
+            save_recipe,
+        )
+        self._undo_stack.push(cmd)
+        n = len(targets)
+        self._statusbar.showMessage(
+            f"Position de « {step_id} » (#{index + 1}) propagée à {n} image(s).")
+        if hasattr(self, "_notif"):
+            self._notif.notify(
+                f"Position propagée : {step_id}",
+                f"Rang {index + 1}  •  {n} image(s)",
                 level=Level.INFO,
                 duration=3500,
             )

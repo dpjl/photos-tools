@@ -410,8 +410,13 @@ class GenRefEngine:
 
     def generate(self, img_bgr: np.ndarray, prompt: str, seed: int = 42,
                  steps: int = 28, guidance: float = 4.0,
-                 on_progress=None) -> np.ndarray:
-        """Génère la référence (~1 Mpx, ratio préservé). on_progress(i, n)."""
+                 on_progress=None, keep_loaded: bool = False) -> np.ndarray:
+        """Génère la référence (~1 Mpx, ratio préservé). on_progress(i, n).
+
+        keep_loaded : garder le pipeline en VRAM après la génération —
+        réservé aux enchaînements (pré-génération batch) ; l'appelant DOIT
+        appeler unload() à la fin de la série.
+        """
         import torch
         from PIL import Image
 
@@ -458,7 +463,7 @@ class GenRefEngine:
             # En repli cpu_offload, on GARDE le pipeline chargé : c'est le
             # cycle déchargement/rechargement en RAM qui causait les
             # OOM kill (« Killed »).
-            if self._gpu_resident:
+            if self._gpu_resident and not keep_loaded:
                 # La référence locale doit disparaître AVANT le gc.collect()
                 # de unload(), sinon les tenseurs restent vivants.
                 del pipe

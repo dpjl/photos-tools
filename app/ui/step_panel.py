@@ -104,6 +104,7 @@ class StepPanel(QWidget):
     crop_edit_requested     = pyqtSignal(str)               # step_id — ouvrir l'éditeur de crop
     color_picker_requested  = pyqtSignal(str)               # step_id — ouvrir la pipette WB
     genref_requested        = pyqtSignal(str)               # step_id — ouvrir le générateur de référence IA
+    position_propagate_requested = pyqtSignal(str)          # step_id — propager la position (batch)
 
     def __init__(self, step, parent=None):
         super().__init__(parent)
@@ -184,6 +185,25 @@ class StepPanel(QWidget):
             )
         )
         hdr_layout.addWidget(self._enabled_propagate_btn)
+
+        # Bouton propagation de la POSITION (mode batch uniquement, caché par défaut)
+        self._position_propagate_btn = QPushButton("⇅")
+        self._position_propagate_btn.setFixedHeight(16)
+        self._position_propagate_btn.setMaximumWidth(0)  # invisible par défaut
+        self._position_propagate_btn.setStyleSheet(
+            "QPushButton { background: #1e3050; color: #7ab; border-radius: 3px;"
+            "  border: 1px solid #2a4060; font-size: 9px; padding: 0; }"
+            "QPushButton:hover { background: #2a4470; color: #adf; }"
+        )
+        self._position_propagate_btn.setToolTip(
+            "Propager la POSITION de cette étape aux images sélectionnées :\n"
+            "elle prendra le même rang dans leur pipeline (les autres étapes\n"
+            "se décalent)."
+        )
+        self._position_propagate_btn.clicked.connect(
+            lambda: self.position_propagate_requested.emit(self._step.id)
+        )
+        hdr_layout.addWidget(self._position_propagate_btn)
 
         # Flèche expand/collapse
         self._arrow = QLabel("▶")
@@ -373,13 +393,14 @@ class StepPanel(QWidget):
         """Active ou désactive les boutons ⬇ de propagation sur chaque ligne et le header."""
         for row in self._param_rows.values():
             row.set_propagate_visible(visible)
-        # Bouton header : propagation de l'état activé
-        if visible:
-            self._enabled_propagate_btn.setMaximumWidth(20)
-            self._enabled_propagate_btn.setVisible(True)
-        else:
-            self._enabled_propagate_btn.setMaximumWidth(0)
-            self._enabled_propagate_btn.setVisible(False)
+        # Boutons header : propagation de l'état activé et de la position
+        for btn in (self._enabled_propagate_btn, self._position_propagate_btn):
+            if visible:
+                btn.setMaximumWidth(20)
+                btn.setVisible(True)
+            else:
+                btn.setMaximumWidth(0)
+                btn.setVisible(False)
 
     def set_state(self, state: str, message: str = ""):
         self._state = state
@@ -493,6 +514,7 @@ class StepPanel(QWidget):
             self._enable_cb.x()
             + self._enable_cb.width()
             + self._enabled_propagate_btn.width()
+            + self._position_propagate_btn.width()
             + 8
         )
         if event.position().x() > guard_x:
@@ -530,6 +552,7 @@ class StepListWidget(QWidget):
     crop_edit_requested         = pyqtSignal(str)
     color_picker_requested      = pyqtSignal(str)
     genref_requested            = pyqtSignal(str)
+    position_propagate_requested = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -569,6 +592,8 @@ class StepListWidget(QWidget):
             panel.crop_edit_requested.connect(self.crop_edit_requested)
             panel.color_picker_requested.connect(self.color_picker_requested)
             panel.genref_requested.connect(self.genref_requested)
+            panel.position_propagate_requested.connect(
+                self.position_propagate_requested)
             self._panels[step.id] = panel
             self._order.append(step.id)
             self._vbox.insertWidget(len(self._order) - 1, panel)

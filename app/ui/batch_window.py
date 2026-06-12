@@ -66,6 +66,7 @@ from ui.batch_mixins.artifacts import ArtifactsMixin
 from ui.batch_mixins.redzones import RedZonesMixin
 from ui.batch_mixins.vlm import VlmMixin
 from ui.batch_mixins.genref import GenRefMixin
+from ui.batch_mixins.genref_pregen import GenRefPregenMixin
 
 
 class BatchWindow(
@@ -78,6 +79,7 @@ class BatchWindow(
     RedZonesMixin,
     VlmMixin,
     GenRefMixin,
+    GenRefPregenMixin,
     QMainWindow,
 ):
     """Fenêtre de traitement par lots."""
@@ -270,6 +272,8 @@ class BatchWindow(
         self._vram_timer.start()
         self._update_vram_gauge()
 
+        lay.addWidget(self._build_pregen_button())
+
         self._selection_btn = QPushButton("▶  Lancer la sélection")
         self._style_btn(self._selection_btn, accent=True)
         self._selection_btn.setToolTip(
@@ -393,6 +397,7 @@ class BatchWindow(
         self._step_list.param_propagate_requested.connect(self._on_param_propagate)
         self._step_list.enabled_changed.connect(self._on_enabled_changed)
         self._step_list.enabled_propagate_requested.connect(self._on_enabled_propagate)
+        self._step_list.position_propagate_requested.connect(self._on_position_propagate)
         self._step_list.order_reordered.connect(self._on_order_reordered)
         self._step_list.mask_edit_requested.connect(self._on_mask_edit_requested)
         self._step_list.crop_edit_requested.connect(self._on_crop_edit_requested)
@@ -1079,11 +1084,12 @@ class BatchWindow(
 
         # Arrêter proprement les workers d'arrière-plan encore actifs
         for worker in (getattr(self, "_full_preview_worker", None),
-                       getattr(self, "_genref_input_worker", None)):
+                       getattr(self, "_genref_input_worker", None),
+                       getattr(self, "_pregen_worker", None)):
             if worker is not None and worker.isRunning():
                 if hasattr(worker, "cancel"):
                     worker.cancel()
-                worker.wait(1000)
+                worker.wait(3000)
 
         self._save_current_state()
         self._session.save_session_meta()

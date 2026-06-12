@@ -193,6 +193,66 @@ class PropagateParamCommand(QUndoCommand):
                 self._apply(self._sid, self._key, old)
 
 
+class PropagatePositionCommand(QUndoCommand):
+    """Commande annulable pour la propagation de la POSITION d'une étape.
+
+    L'étape est insérée à l'index donné dans l'ordre de chaque image cible
+    (les autres étapes se décalent). Les anciens ordres complets sont
+    capturés au moment du push (snapshot par image).
+    """
+
+    def __init__(
+        self,
+        step_id:        str,
+        index:          int,
+        targets,         # list[BatchImageConfig]
+        old_orders: dict,  # {file_path → list[str]} — snapshot
+        get_current_fn:  Callable,
+        apply_ui_fn:     Callable,   # (order) → None  (UI de l'image courante)
+        save_recipe_fn:  Callable,
+    ) -> None:
+        super().__init__(
+            f"Position de {step_id} → #{index + 1} sur {len(targets)} image(s)"
+        )
+        self._sid     = step_id
+        self._index   = index
+        self._targets = list(targets)
+        self._old     = {k: list(v) for k, v in old_orders.items()}
+        self._get_cur = get_current_fn
+        self._apply   = apply_ui_fn
+        self._save    = save_recipe_fn
+        self._first   = True
+
+    @staticmethod
+    def place_step(order: list, step_id: str, index: int) -> list:
+        """Retourne un nouvel ordre avec step_id inséré à index."""
+        new_order = [s for s in order if s != step_id]
+        new_order.insert(min(index, len(new_order)), step_id)
+        return new_order
+
+    def redo(self) -> None:
+        if self._first:
+            self._first = False
+            return
+        current = self._get_cur()
+        for cfg in self._targets:
+            cfg.step_order = self.place_step(cfg.step_order, self._sid,
+                                             self._index)
+            self._save(cfg)
+        if current is not None and current in self._targets:
+            self._apply(list(current.step_order))
+
+    def undo(self) -> None:
+        current = self._get_cur()
+        for cfg in self._targets:
+            old = self._old.get(cfg.file_path)
+            if old is not None:
+                cfg.step_order = list(old)
+            self._save(cfg)
+        if current is not None and current in self._targets:
+            self._apply(list(current.step_order))
+
+
 class PropagateEnabledCommand(QUndoCommand):
     """Commande annulable pour la propagation de l'état activé/désactivé d'une étape."""
 
