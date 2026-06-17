@@ -9,6 +9,7 @@ from steps.step_crop           import CropStep
 from steps.step_facehighlight  import FaceHighlightStep
 from steps.step_inpaint        import InpaintStep
 from steps.step_redeye         import RedEyeStep
+from steps.step_redlips        import RedLipsStep
 from steps.step_gfpgan         import GFPGANStep
 from steps.step_scunet         import SCUNetStep
 from steps.step_rembg          import RembgStep
@@ -26,6 +27,7 @@ ALL_STEPS = [
     WhiteBalanceStep(),    # Balance des blancs (pipette)   — désactivée par défaut
     InpaintStep(),         # Retouche inpainting (LaMa)     — désactivée par défaut
     RedEyeStep(),          # Correction yeux rouges         — activée par défaut
+    RedLipsStep(),         # Correction lèvres trop rouges  — désactivée par défaut
     GFPGANStep(),          # Restauration visages           — activée par défaut
     SCUNetStep(),          # Embellissement SCUNet          — activée par défaut
     LightLeakStep(),       # Lumière parasite               — désactivée par défaut
@@ -38,6 +40,7 @@ ALL_STEPS = [
 __all__ = [
     "ALL_STEPS",
     "ColorStep", "AutoColorStep", "DDColorLUTStep", "GenRefStep", "CropStep",
-    "FaceHighlightStep", "LightLeakStep", "RedEyeStep", "GFPGANStep",
+    "FaceHighlightStep", "LightLeakStep", "RedEyeStep", "RedLipsStep",
+    "GFPGANStep",
     "SCUNetStep", "RembgStep", "RedZoneStep", "UpscaleStep",
 ]

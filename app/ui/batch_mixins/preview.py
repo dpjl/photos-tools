@@ -11,7 +11,7 @@ from PyQt6.QtCore import pyqtSlot, QTimer
 
 from ui.batch_window_constants import (
     _FAST_PREVIEW_IDS, _PREVIEW_TABS,
-    _TAB_MASK, _TAB_REDZONE, _TAB_WB, _TAB_REDEYE,
+    _TAB_MASK, _TAB_REDZONE, _TAB_WB, _TAB_REDEYE, _TAB_REDLIPS,
     _TAB_CROP, _TAB_GENREF,
     _TAB_PREVIEW, _TAB_RESULT,
     _TAB_ORIGIN,
@@ -62,7 +62,8 @@ class PreviewMixin:
         self._prev_tab_index = index
 
         # 2. Sync éditeurs → cfg en mémoire quand on quitte un onglet éditeur
-        if prev in (_TAB_MASK, _TAB_REDZONE, _TAB_WB, _TAB_REDEYE, _TAB_CROP):
+        if prev in (_TAB_MASK, _TAB_REDZONE, _TAB_WB, _TAB_REDEYE,
+                    _TAB_REDLIPS, _TAB_CROP):
             self._sync_editor_state()
 
         # 3. Charger le résultat si besoin
@@ -100,6 +101,8 @@ class PreviewMixin:
             return self._wb_panel._canvas
         if index == _TAB_REDEYE:
             return self._redeye_panel._canvas
+        if index == _TAB_REDLIPS:
+            return self._redlips_panel._canvas
         if index == _TAB_CROP:
             return self._crop_panel._canvas
         if index == _TAB_GENREF:
@@ -210,13 +213,14 @@ class PreviewMixin:
         return out
 
     def _refresh_panels(self, img: np.ndarray) -> None:
-        """Met à jour les panneaux Masque, Zones rouges, Blanc, Yeux rouges et Preview."""
+        """Met à jour les panneaux Masque, Zones rouges, Blanc, Yeux rouges, Lèvres et Preview."""
         if self._current_cfg is None:
             return
         self._mask_panel._canvas.set_display_image(img)
         self._redzone_panel._canvas.set_display_image(img)
         self._wb_panel._canvas.set_display_image(img)
         self._redeye_panel._canvas.set_display_image(img)
+        self._redlips_panel._canvas.set_display_image(img)
         self._preview_full_img = None
         self._last_fast_preview = img
         self._preview_stale = False
@@ -284,6 +288,7 @@ class PreviewMixin:
             self._redzone_panel._canvas.set_display_image(result_img)
             self._wb_panel._canvas.set_display_image(result_img)
             self._redeye_panel._canvas.set_display_image(result_img)
+            self._redlips_panel._canvas.set_display_image(result_img)
             if self._preview_overlay_step:
                 overlay = self._build_overlay_img(result_img)
                 self._preview_view.set_image(
@@ -334,6 +339,16 @@ class PreviewMixin:
                 cv2.circle(overlay, (int(ix), int(iy)), max(int(ir), 2), color, 2, cv2.LINE_AA)
                 cv2.circle(overlay, (int(ix), int(iy)), 1,
                            (0, 255, 150) if corrected else (0, 220, 240), -1, cv2.LINE_AA)
+
+        elif self._preview_overlay_step == "redlips":
+            for det in context.get("redlips_detections", []):
+                polygon = det.get("polygon")
+                if not polygon:
+                    continue
+                pts = np.array(polygon, dtype=np.int32).reshape(-1, 1, 2)
+                corrected = det.get("corrected", False)
+                color = (0, 220, 80) if corrected else (0, 180, 200)
+                cv2.polylines(overlay, [pts], True, color, 2, cv2.LINE_AA)
 
         elif self._preview_overlay_step == "facehighlight":
             for det in context.get("highlight_detections", []):

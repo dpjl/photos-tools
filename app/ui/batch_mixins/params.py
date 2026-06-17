@@ -12,7 +12,8 @@ from ui.param_history import (
     MoveStepCommand, ToggleStepCommand,
 )
 from ui.batch_window_constants import (
-    _FAST_PREVIEW_IDS, _TAB_MASK, _TAB_REDZONE, _TAB_WB, _TAB_REDEYE, _TAB_CROP,
+    _FAST_PREVIEW_IDS, _TAB_MASK, _TAB_REDZONE, _TAB_WB, _TAB_REDEYE,
+    _TAB_REDLIPS, _TAB_CROP,
 )
 
 
@@ -331,6 +332,8 @@ class ParamsMixin:
             self._schedule_preview_update()
         elif idx == _TAB_REDEYE:
             self._redeye_panel._canvas.undo()
+        elif idx == _TAB_REDLIPS:
+            self._redlips_panel._canvas.undo()
         else:
             self._undo_stack.undo()
 
@@ -348,6 +351,8 @@ class ParamsMixin:
             self._schedule_preview_update()
         elif idx == _TAB_REDEYE:
             self._redeye_panel._canvas.redo()
+        elif idx == _TAB_REDLIPS:
+            self._redlips_panel._canvas.redo()
         else:
             self._undo_stack.redo()
 

@@ -172,6 +172,7 @@ class RunMixin:
                 self._redzone_panel._canvas.set_display_image(result_img)
                 self._wb_panel._canvas.set_display_image(result_img)
                 self._redeye_panel._canvas.set_display_image(result_img)
+                self._redlips_panel._canvas.set_display_image(result_img)
 
         cfg.batch_status = "done"
         self._strip.set_running(cfg.file_path, False)

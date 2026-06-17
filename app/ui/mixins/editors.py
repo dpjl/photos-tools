@@ -160,6 +160,16 @@ class EditorsMixin:
                 cv2.circle(overlay, (int(ix), int(iy)), 1,
                            (0, 255, 150) if corrected else (0, 220, 240), -1, cv2.LINE_AA)
 
+        elif self._overlay_step == "redlips":
+            for det in context.get("redlips_detections", []):
+                polygon = det.get("polygon")
+                if not polygon:
+                    continue
+                pts = np.array(polygon, dtype=np.int32).reshape(-1, 1, 2)
+                corrected = det.get("corrected", False)
+                color = (0, 220, 80) if corrected else (0, 180, 200)
+                cv2.polylines(overlay, [pts], True, color, 2, cv2.LINE_AA)
+
         elif self._overlay_step == "facehighlight":
             for det in context.get("highlight_detections", []):
                 bbox = det.get("bbox")

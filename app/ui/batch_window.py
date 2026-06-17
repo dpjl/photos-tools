@@ -520,6 +520,23 @@ class BatchWindow(
         _btn_redeye_auto.clicked.connect(self._redeye_auto_detect)
         self._redeye_panel.add_to_sidebar(_btn_redeye_auto)
 
+        self._redlips_panel = MaskCanvasPanel(_dummy, None, show_ok_cancel=False,
+                                              sidebar_width=_SIDEBAR_W,
+                                              title="Masque des lèvres")
+        _btn_redlips_auto = QPushButton("🔍  Détecter lèvres auto")
+        _btn_redlips_auto.setToolTip(
+            "Détecte automatiquement les bouches (landmarks visage)\n"
+            "et ajoute le contour des lèvres dans le masque."
+        )
+        _btn_redlips_auto.setStyleSheet(
+            "QPushButton { background:#1e2a1e; color:#6e8; border:1px solid #3a5a3a;"
+            "  border-radius:4px; padding:5px 6px; font-size:10px; }"
+            "QPushButton:hover { background:#2a3a2a; color:#aea; }"
+            "QPushButton:disabled { color:#445; border-color:#223; }"
+        )
+        _btn_redlips_auto.clicked.connect(self._redlips_auto_detect)
+        self._redlips_panel.add_to_sidebar(_btn_redlips_auto)
+
         self._crop_panel = CropCanvasPanel(_dummy, None, show_ok_cancel=False,
                                            sidebar_width=_SIDEBAR_W)
 
@@ -582,6 +599,7 @@ class BatchWindow(
         self._tabs.addTab(self._redzone_panel,                            "Zones rouges")  # _TAB_REDZONE
         self._tabs.addTab(self._wb_panel,                                 "Blanc")         # _TAB_WB
         self._tabs.addTab(self._redeye_panel,                             "Yeux rouges")   # _TAB_REDEYE
+        self._tabs.addTab(self._redlips_panel,                            "Lèvres")        # _TAB_REDLIPS
         self._tabs.addTab(self._crop_panel,                               "Recadrage")     # _TAB_CROP
         self._tabs.addTab(self._build_genref_tab(_SIDEBAR_W),             "Réf. IA")       # _TAB_GENREF
         self._tabs.addTab(self._wrap_with_sidebar(self._origin_view, _SIDEBAR_W), "Originale")  # _TAB_ORIGIN
@@ -663,6 +681,40 @@ class BatchWindow(
         self._redeye_panel._canvas.set_mask(merged)
         n_eyes = int(cv2.connectedComponents(new_mask)[0]) - 1
         self._statusbar.showMessage(f"{n_eyes} iris détecté(s) — masque mis à jour.")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Lèvres — détection auto
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _redlips_auto_detect(self) -> None:
+        """Détecte les bouches automatiquement et ajoute les lèvres au masque."""
+        from PyQt6.QtWidgets import QApplication
+        img = getattr(self, "_current_orig", None)
+        if img is None:
+            self._statusbar.showMessage("Aucune image chargée.")
+            return
+        redlips_step = self._steps_by_id.get("redlips")
+        if redlips_step is None or not hasattr(redlips_step, "detect_lips_mask"):
+            return
+
+        self._statusbar.showMessage("Détection des lèvres en cours…")
+        QApplication.processEvents()
+
+        try:
+            new_mask = redlips_step.detect_lips_mask(img)
+        except Exception as exc:
+            self._statusbar.showMessage(f"Erreur détection : {exc}")
+            return
+
+        if new_mask is None:
+            self._statusbar.showMessage("Aucune bouche détectée automatiquement.")
+            return
+
+        existing = self._redlips_panel.get_mask()
+        merged   = cv2.bitwise_or(existing, new_mask)
+        self._redlips_panel._canvas.set_mask(merged)
+        n_mouths = int(cv2.connectedComponents(new_mask)[0]) - 1
+        self._statusbar.showMessage(f"{n_mouths} bouche(s) détectée(s) — masque mis à jour.")
 
     # ══════════════════════════════════════════════════════════════════════════
     # Helpers image résultat
@@ -786,6 +838,9 @@ class BatchWindow(
         redeye = mgr.load_redeye_mask(entry)
         if redeye is not None:
             data["_redeye_mask"] = redeye
+        redlips = mgr.load_redlips_mask(entry)
+        if redlips is not None:
+            data["_redlips_mask"] = redlips
         redzone = mgr.load_redzone_mask(entry)
         if redzone is not None:
             data["_redzone_mask"] = redzone
@@ -820,6 +875,7 @@ class BatchWindow(
             self._mask_panel.set_image(display, cfg.inpaint_mask)
             self._redzone_panel.set_image(display, cfg.redzone_mask)
             self._redeye_panel.set_image(self._current_orig, cfg.redeye_mask)
+            self._redlips_panel.set_image(self._current_orig, cfg.redlips_mask)
             self._crop_panel.set_image(self._current_orig, cfg.crop_rect)
             # Les caches de détection sont liés à l'image précédente
             self._artifact_probs = None

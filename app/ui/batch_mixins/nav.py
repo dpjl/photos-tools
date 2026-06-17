@@ -115,6 +115,7 @@ class NavMixin:
             self._redzone_panel.set_image(display, cfg.redzone_mask)
             self._wb_panel.set_image(display, cfg.wb_pick, cfg.wb_patch_radius)
             self._redeye_panel.set_image(img, cfg.redeye_mask)
+            self._redlips_panel.set_image(img, cfg.redlips_mask)
             self._crop_panel.set_image(img, cfg.crop_rect)
 
         # ── Onglet Originale ──────────────────────────────────────────────────
@@ -194,6 +195,8 @@ class NavMixin:
         cfg.inpaint_mask = raw_mask if (raw_mask is not None and raw_mask.any()) else None
         raw_redeye = self._redeye_panel.get_mask()
         cfg.redeye_mask = raw_redeye if (raw_redeye is not None and raw_redeye.any()) else None
+        raw_redlips = self._redlips_panel.get_mask()
+        cfg.redlips_mask = raw_redlips if (raw_redlips is not None and raw_redlips.any()) else None
         raw_redzone = self._redzone_panel.get_mask()
         cfg.redzone_mask = raw_redzone if (raw_redzone is not None and raw_redzone.any()) else None
         cfg.crop_rect = self._crop_panel.get_crop_rect()
@@ -223,6 +226,13 @@ class NavMixin:
                 redeye_step.set_redeye_mask(cfg.redeye_mask)
             else:
                 redeye_step.clear_redeye_mask()
+
+        redlips_step = self._steps_by_id.get("redlips")
+        if redlips_step and hasattr(redlips_step, "set_redlips_mask"):
+            if cfg.redlips_mask is not None:
+                redlips_step.set_redlips_mask(cfg.redlips_mask)
+            else:
+                redlips_step.clear_redlips_mask()
 
         redzone_step = self._steps_by_id.get("redzone")
         if redzone_step and hasattr(redzone_step, "set_mask"):
@@ -265,6 +275,9 @@ class NavMixin:
         redeye_step = self._steps_by_id.get("redeye")
         if redeye_step and hasattr(redeye_step, "clear_redeye_mask"):
             redeye_step.clear_redeye_mask()
+        redlips_step = self._steps_by_id.get("redlips")
+        if redlips_step and hasattr(redlips_step, "clear_redlips_mask"):
+            redlips_step.clear_redlips_mask()
         redzone_step = self._steps_by_id.get("redzone")
         if redzone_step and hasattr(redzone_step, "clear_mask"):
             redzone_step.clear_mask()
