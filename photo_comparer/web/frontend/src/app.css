@@ -1,0 +1,28 @@
+:root {
+  color-scheme: dark;
+  --bg: #1e1e1e;
+  --fg: #c8c8c8;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  overscroll-behavior: none;
+}
+
+#app {
+  height: 100%;
+}
+
+button {
+  font-family: inherit;
+}

@@ -1,6 +1,7 @@
 """Scans a set of directories and groups matching photos by prefix key."""
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -8,6 +9,16 @@ from .photo_group import PhotoGroup
 from ..utils.prefix_extractor import extract_prefix
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp", ".webp"}
+
+# Fichiers annexes (sidecars) générés par l'outil de retouche : masques
+# (« .mask.png », « .redeye_mask.png »…) et références IA versionnées
+# (ex. « 1985-0001.genref.001.png »).
+_SIDECAR_RE = re.compile(r"(?:[._]mask|\.genref\.\d+)\.png$")
+
+
+def is_sidecar_image(name: str) -> bool:
+    """Vrai pour les images annexes à exclure des scans (masques, réf. IA)."""
+    return _SIDECAR_RE.search(name.lower()) is not None
 
 
 class DirectoryManager:
@@ -38,7 +49,7 @@ class DirectoryManager:
             for fp in directory.iterdir():
                 if fp.suffix.lower() not in IMAGE_EXTENSIONS:
                     continue
-                if fp.name.lower().endswith(".mask.png"):
+                if is_sidecar_image(fp.name):
                     continue
                 key = extract_prefix(fp.name)
                 if key not in self._group_map:

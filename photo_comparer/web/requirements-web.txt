@@ -1,0 +1,4 @@
+# Dépendances backend web (en plus de Pillow déjà utilisé par l'app).
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
