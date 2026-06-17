@@ -468,7 +468,14 @@ class GenRefEngine:
                 # de unload(), sinon les tenseurs restent vivants.
                 del pipe
                 self.unload()
-        return cv2.cvtColor(np.array(out), cv2.COLOR_RGB2BGR)
+        ref = cv2.cvtColor(np.array(out), cv2.COLOR_RGB2BGR)
+        # Resize cosmétique vers les dimensions d'entrée : l'arrondi /16 de
+        # FLUX change le ratio (~0,3 %) et la référence ne se superposait pas
+        # à l'original. Sans effet sur la LUT : _warp_reference redimensionne
+        # déjà la référence aux dimensions de l'original (même interpolation).
+        if ref.shape[:2] != (h, w):
+            ref = cv2.resize(ref, (w, h), interpolation=cv2.INTER_CUBIC)
+        return ref
 
 
 # ══════════════════════════════════════════════════════════════════════════
